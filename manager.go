@@ -1,0 +1,997 @@
+package configmanager
+
+import (
+	"context"
+	"fmt"
+	"github.com/Oudwins/zog"
+	_ "github.com/Oudwins/zog"
+	"github.com/go-viper/mapstructure/v2"
+	"github.com/knadh/koanf/v2"
+	"github.com/samber/lo"
+	"github.com/spf13/cast"
+	ireflect "go.lumeweb.com/configmanager/internal/reflect"
+	"go.lumeweb.com/configmanager/source"
+	csync "go.lumeweb.com/configmanager/sync"
+	"go.lumeweb.com/event/v2"
+	"go.uber.org/zap"
+	"reflect"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	schemaValidationRootPath = "$root"
+	keySeparator             = "."
+)
+
+// ConfigManagerDefault is the central point of interaction for accessing and managing configuration.
+type ConfigManagerDefault struct {
+	syncMgr          csync.Manager
+	koanf            *koanf.Koanf
+	sources          []source.ConfigSource
+	logger           *zap.Logger
+	events           event.EventManager[csync.ConfigEvent]
+	flagManager      FlagManager
+	configStructs    map[string]reflect.Type
+	configStructLock sync.RWMutex
+	configFile       string
+	configDir        string
+	tagName          string
+	registry         ConfigRegistry
+	syncConfigNS     string // Namespace for sync client configuration
+}
+
+// Ensure ConfigManagerDefault implements Manager interface
+var _ Manager = (*ConfigManagerDefault)(nil)
+
+// Subscribe registers a callback to be notified when configuration changes matching the key pattern occur.
+// The pattern can contain wildcards:
+// - "*" matches any single path segment
+// - "**" matches any remaining path segments
+// Returns an unsubscribe function.
+func (cm *ConfigManagerDefault) Subscribe(pattern string, callback SubscriptionCallback) func() {
+	cm.logger.Debug("Adding subscription",
+		zap.String("pattern", pattern),
+		zap.String("callback", fmt.Sprintf("%p", callback)))
+
+	// Create a simple event listener that calls the callback
+	listener := event.NewListenerFunc(func(e event.Event[csync.ConfigEvent]) error {
+		cm.logger.Debug("Subscription callback triggered",
+			zap.String("pattern", pattern),
+			zap.String("event_key", e.Name()))
+
+		callback(pattern)
+		return nil
+	})
+
+	// Add the listener with the pattern as the event name
+	cm.events.AddListener(pattern, listener)
+
+	// Return an unsubscribe function that removes the listener
+	return func() {
+		cm.logger.Debug("Removing subscription",
+			zap.String("pattern", pattern))
+		cm.events.RemoveListener(pattern, listener)
+	}
+}
+
+// reloadConfig reloads configuration from a source
+func (cm *ConfigManagerDefault) reloadConfig(ctx context.Context, source source.ConfigSource) error {
+	if err := source.Load(ctx, cm.koanf); err != nil {
+		return fmt.Errorf("failed to reload config: %w", err)
+	}
+	return nil
+}
+
+func (cm *ConfigManagerDefault) handleConfigChanges(_source source.ConfigSource, changedKeys []string) {
+	if len(changedKeys) == 0 {
+		// No changes detected, nothing to do
+		return
+	}
+
+	if len(changedKeys) == 1 && changedKeys[0] == source.WatchAllChanges {
+		// All config may have changed, reload the entire source
+		if err := _source.Load(context.Background(), cm.koanf); err != nil {
+			cm.logger.Error("Failed to reload configuration from source",
+				zap.String("source", fmt.Sprintf("%T", _source)),
+				zap.Error(err))
+		}
+		return
+	}
+
+	// Selectively reload for specific keys (notification happens in reloadKey)
+	for _, key := range changedKeys {
+		if err := cm.reloadKey(context.Background(), _source, key); err != nil {
+			cm.logger.Error("Failed to reload configuration key",
+				zap.String("config_key", key),
+				zap.String("source", fmt.Sprintf("%T", _source)),
+				zap.Error(err))
+		}
+	}
+}
+
+func (cm *ConfigManagerDefault) reloadKey(ctx context.Context, source source.ConfigSource, key string) error {
+	// Get the new value for the key from the source
+	newValue, err := cm.getKeyFromSource(ctx, source, key)
+	if err != nil {
+		return fmt.Errorf("failed to get new value for key %s from source: %w", key, err)
+	}
+
+	// Get the old value before updating
+	var oldValue any
+	if cm.koanf.Exists(key) {
+		oldValue = cm.koanf.Get(key)
+	}
+
+	// Update the value in Koanf
+	if err := cm.koanf.Set(key, newValue); err != nil {
+		return fmt.Errorf("failed to set new value for key %s in koanf: %w", key, err)
+	}
+
+	// Notify with both old and new values
+	cm.notifySubscribers(key, oldValue, newValue)
+
+	return nil
+}
+
+func (cm *ConfigManagerDefault) getKeyFromSource(ctx context.Context, source source.ConfigSource, key string) (any, error) {
+	// Create a temporary Koanf instance
+	tmpKoanf := koanf.New(".")
+
+	// Load only the specific key from the source into the temporary Koanf instance
+	if err := source.Load(ctx, tmpKoanf); err != nil {
+		return nil, fmt.Errorf("failed to load config from source: %w", err)
+	}
+
+	// Get the value of the key from the temporary Koanf instance
+	if !tmpKoanf.Exists(key) {
+		return nil, fmt.Errorf("key %s not found in source", key)
+	}
+	return tmpKoanf.Get(key), nil
+}
+
+func (cm *ConfigManagerDefault) notifySubscribers(key string, oldValue any, newValue any) {
+	cm.logger.Debug("Config changed",
+		zap.String("key", key))
+
+	// Fire one event for the full key path
+	// The event manager will handle pattern matching via matchNodePath
+	evt := csync.NewConfigEvent(key, newValue, oldValue, key)
+	if err := cm.events.FireEvent(evt); err != nil {
+		cm.logger.Error("Failed to notify configuration change",
+			zap.String("config_key", key),
+			zap.Error(err))
+	}
+}
+
+// NewConfigManager creates a new ConfigManagerDefault.
+// Sources can be:
+// - string paths (automatically wrapped as file sources)
+// - source.ConfigSource implementations
+// - []source.ConfigSource slice
+func NewConfigManager(sources any, opts ...ConfigOption) (*ConfigManagerDefault, error) {
+	k := koanf.New(".")
+	eventMgr := event.NewManager[csync.ConfigEvent]("", event.UsePathMode)
+
+	// Convert sources to ConfigSource interfaces
+	var configSources []source.ConfigSource
+
+	switch v := sources.(type) {
+	case []any:
+		for _, s := range v {
+			switch sv := s.(type) {
+			case string:
+				// Treat strings as file paths
+				configSources = append(configSources, source.NewFileSource(sv))
+			case source.ConfigSource:
+				configSources = append(configSources, sv)
+			default:
+				return nil, fmt.Errorf("invalid source type: %T", s)
+			}
+		}
+	case []source.ConfigSource:
+		configSources = v
+	case string:
+		configSources = append(configSources, source.NewFileSource(v))
+	case source.ConfigSource:
+		configSources = append(configSources, v)
+	default:
+		return nil, fmt.Errorf("invalid sources type: %T, expected []any, []source.ConfigSource, string or source.ConfigSource", sources)
+	}
+
+	cm := &ConfigManagerDefault{
+		koanf:         k,
+		sources:       configSources,
+		logger:        zap.NewNop(), // Default no-op logger
+		events:        eventMgr,
+		flagManager:   NewFlagManager(),
+		configStructs: make(map[string]reflect.Type),
+		tagName:       "config", // Default tag name
+		registry:      NewDefaultConfigRegistry(),
+		syncConfigNS:  "sync.config", // Default sync config namespace
+	}
+
+	for _, opt := range opts {
+		if err := opt(cm); err != nil {
+			return nil, fmt.Errorf("failed to apply config option: %w", err)
+		}
+	}
+
+	// Set default config file and dir if not provided
+	if cm.configFile == "" {
+		cm.configFile = "config.yaml"
+	}
+	if cm.configDir == "" {
+		cm.configDir = "."
+	}
+
+	return cm, nil
+}
+
+// SetupSync configures the sync manager with options and starts it
+func (cm *ConfigManagerDefault) SetupSync(opts ...ConfigOption) error {
+	for _, opt := range opts {
+		if err := opt(cm); err != nil {
+			return fmt.Errorf("failed to apply config option: %w", err)
+		}
+	}
+
+	if cm.syncMgr == nil {
+		return fmt.Errorf("sync manager is nil")
+	}
+
+	// Configure sync manager
+	if err := cm.syncMgr.Configure(cm, cm.syncConfigNS); err != nil {
+		return fmt.Errorf("failed to configure sync manager: %w", err)
+	}
+
+	// Start sync manager
+	if err := cm.syncMgr.Start(context.Background()); err != nil {
+		return fmt.Errorf("failed to start sync manager: %w", err)
+	}
+
+	return nil
+}
+
+// Load loads the initial configuration from the configured sources.
+func (cm *ConfigManagerDefault) Load() error {
+	for _, _source := range cm.sources {
+		if err := _source.Load(context.Background(), cm.koanf); err != nil {
+			return fmt.Errorf("failed to load config from source: %w", err)
+		}
+
+		// Start watching for changes if the source supports it
+		if err := _source.Watch(context.Background(), cm.koanf, func(changedKeys []string, err error) {
+			cm.handleConfigChanges(_source, changedKeys)
+		}); err != nil {
+			cm.logger.Warn("failed to start config watcher",
+				zap.String("source", fmt.Sprintf("%T", _source)),
+				zap.Error(err))
+		}
+	}
+
+	return nil
+}
+
+// GetString returns the string value for the given key.
+func (cm *ConfigManagerDefault) GetString(key string) (string, error) {
+	val, err := cm.Get(key)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%v", val), nil
+}
+
+// GetInt returns the int64 value for the given key.
+func (cm *ConfigManagerDefault) GetInt(key string) (int64, error) {
+	val, err := cm.Get(key)
+	if err != nil {
+		return 0, err
+	}
+	return cast.ToInt64E(val)
+}
+
+// GetBool returns the bool value for the given key.
+func (cm *ConfigManagerDefault) GetBool(key string) (bool, error) {
+	val, err := cm.Get(key)
+	if err != nil {
+		return false, err
+	}
+	return cast.ToBoolE(val)
+}
+
+// GetDuration returns the time.Duration value for the given key.
+func (cm *ConfigManagerDefault) GetDuration(key string) (time.Duration, error) {
+	val, err := cm.Get(key)
+	if err != nil {
+		return 0, err
+	}
+	return cast.ToDurationE(val)
+}
+
+// GetStringSlice returns the []string value for the given key.
+func (cm *ConfigManagerDefault) GetStringSlice(key string) ([]string, error) {
+	val, err := cm.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	return cast.ToStringSliceE(val)
+}
+
+// IsSet checks if a configuration key exists and has a non-zero value.
+func (cm *ConfigManagerDefault) IsSet(ctx context.Context, key string) bool {
+	if !cm.Exists(key) {
+		return false
+	}
+	val := cm.koanf.Get(key)
+	return !reflect.ValueOf(val).IsZero()
+}
+
+// Get returns the configuration value for the given key.
+// If target is provided and a struct is registered for the key, the value will be decoded into the target.
+// It prioritizes the most specific namespace when looking up keys.
+func (cm *ConfigManagerDefault) Get(key string, target ...any) (any, error) {
+	// Find the most specific namespace for this key
+	nsSource, namespacedKey := cm.registry.FindMostSpecificNamespace(key, cm.koanf.Delim())
+
+	var fullKey string
+	if nsSource.Namespace != "" {
+		fullKey = nsSource.Namespace + cm.koanf.Delim() + namespacedKey
+	} else {
+		fullKey = key
+	}
+
+	// Check if we should decode into a struct
+	if len(target) > 0 {
+		return cm.getIntoStruct(fullKey, target[0])
+	}
+
+	// Fall back to basic get
+	if !cm.koanf.Exists(fullKey) {
+		return nil, fmt.Errorf("configuration key '%s' not found", fullKey)
+	}
+	return cm.koanf.Get(fullKey), nil
+}
+
+// getIntoStruct decodes configuration into a registered struct type (used by RegisterStruct)
+func (cm *ConfigManagerDefault) getIntoStruct(key string, target any) (any, error) {
+	if !cm.hasConfigStruct(key) {
+		return nil, fmt.Errorf("no struct registered for key '%s'", key)
+	}
+
+	cm.configStructLock.RLock()
+	structType := cm.configStructs[key]
+	cm.configStructLock.RUnlock()
+
+	// Create new instance if target is nil
+	var cfg any
+	if target == nil {
+		cfg = reflect.New(structType).Interface()
+	} else {
+		// Verify target matches registered type
+		targetType := reflect.TypeOf(target)
+		if targetType.Kind() != reflect.Ptr || targetType.Elem() != structType {
+			return nil, fmt.Errorf("target type %v does not match registered type %v",
+				targetType, structType)
+		}
+		cfg = target
+	}
+
+
+	hooks := []mapstructure.DecodeHookFunc{
+		mapstructure.StringToTimeDurationHookFunc(),
+		mapstructure.StringToSliceHookFunc(","),
+		mapstructure.RecursiveStructToMapHookFunc(),
+		mapstructure.TextUnmarshallerHookFunc(),
+		mapstructure.StringToBasicTypeHookFunc(),
+		// Initialize nil pointer structs before decoding
+		func(f reflect.Type, t reflect.Type, data any) (any, error) {
+			if t.Kind() == reflect.Ptr && t.Elem().Kind() == reflect.Struct {
+				if reflect.ValueOf(data).IsNil() {
+					return reflect.New(t.Elem()).Interface(), nil
+				}
+			}
+			return data, nil
+		},
+		// Convert int to duration in seconds
+		func(f reflect.Kind, t reflect.Kind, data any) (any, error) {
+			if f == reflect.Int && t == reflect.Int64 {
+				// Check if target type is time.Duration (either direct or struct field)
+				if structType.String() == "time.Duration" {
+					// Convert integer seconds to nanoseconds
+					return time.Duration(data.(int)) * time.Second, nil
+				}
+			}
+			// Also handle direct int to duration conversion
+			if f == reflect.Int && t == reflect.TypeOf(time.Duration(0)).Kind() {
+				return time.Duration(data.(int)) * time.Second, nil
+			}
+			return data, nil
+		},
+		// Convert bool to "true"/"false" strings
+		func(f reflect.Kind, t reflect.Kind, data any) (any, error) {
+			if f == reflect.Bool && t == reflect.String {
+				if data.(bool) {
+					return "true", nil
+				}
+				return "false", nil
+			}
+			return data, nil
+		},
+	}
+
+	// Get all config data under the key prefix
+	data := cm.koanf.Cut(key).Raw()
+	if len(data) == 0 {
+		return nil, fmt.Errorf("no data found for key %s", key)
+	}
+
+	// If we already have the correct type, return it directly
+	if reflect.TypeOf(data) == reflect.PointerTo(structType) {
+		return data, nil
+	}
+
+	// Otherwise unmarshal into the target struct
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		DecodeHook:       mapstructure.ComposeDecodeHookFunc(hooks...),
+		TagName:          cm.tagName,
+		WeaklyTypedInput: true,
+		Result:           cfg,
+		Squash:           true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create decoder: %w", err)
+	}
+
+	if err := decoder.Decode(data); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config into struct: %w", err)
+	}
+
+	// Ensure we return a pointer to the struct
+	if reflect.TypeOf(cfg).Kind() != reflect.Ptr {
+		ptr := reflect.New(reflect.TypeOf(cfg))
+		ptr.Elem().Set(reflect.ValueOf(cfg))
+		return ptr.Interface(), nil
+	}
+
+	return cfg, nil
+}
+
+// All retrieves all configuration settings.
+func (cm *ConfigManagerDefault) All() map[string]any {
+	return cm.koanf.All()
+}
+
+// Exists checks if a configuration key exists.
+func (cm *ConfigManagerDefault) Exists(key string) bool {
+	return cm.koanf.Exists(key)
+}
+
+// SetAtomic sets multiple configuration values atomically.
+func (cm *ConfigManagerDefault) SetAtomic(ctx context.Context, updates map[string]any) error {
+	// Track old values and affected structs
+	oldValues := make(map[string]any)
+	structKeys := make(map[string]struct{})
+
+	// First pass: collect old values and identify affected structs
+	for key := range updates {
+		oldValues[key] = cm.koanf.Get(key)
+		structKey := cm.findNearestStructKey(key)
+		if structKey != "" {
+			structKeys[structKey] = struct{}{}
+		}
+	}
+
+	// Second pass: apply all updates
+	for key, value := range updates {
+		if err := cm.koanf.Set(key, value); err != nil {
+			return fmt.Errorf("failed to set config value for key %s: %w", key, err)
+		}
+	}
+
+	// Third pass: validate and notify for affected structs
+	for structKey := range structKeys {
+		newStruct, err := cm.getIntoStruct(structKey, nil)
+		if err != nil {
+			return fmt.Errorf("failed to decode struct for key %s: %w", structKey, err)
+		}
+
+		if err := cm.validateValue(structKey, newStruct); err != nil {
+			// Revert all changes if validation fails
+			for key, oldValue := range oldValues {
+				_ = cm.koanf.Set(key, oldValue)
+			}
+			return fmt.Errorf("validation failed for struct %s: %w", structKey, err)
+		}
+
+		oldValue, _ := cm.Get(structKey)
+		cm.notifySubscribers(structKey, oldValue, newStruct)
+	}
+
+	// Notify simple key/value updates that weren't part of a struct
+	for key, value := range updates {
+		if _, exists := structKeys[cm.findNearestStructKey(key)]; !exists && cm.shouldSyncKey(key) {
+			// Push to sync manager and fire event on success
+			err := cm.syncMgr.Push(ctx, key, value, func(sKey string, sValue any) {
+				cm.notifySubscribers(sKey, oldValues[sKey], sValue)
+			})
+			if err != nil {
+				cm.logger.Error("failed to push config to sync manager after atomic set",
+					zap.String("key", key),
+					zap.Error(err))
+				// Continue with other keys even if one fails
+			}
+		} else if !exists {
+			cm.notifySubscribers(key, oldValues[key], value)
+		}
+	}
+
+	return nil
+}
+
+// Set sets the configuration value for the given key.
+func (cm *ConfigManagerDefault) Set(ctx context.Context, key string, value any) error {
+	// Get the old value before updating
+	oldValue := cm.koanf.Get(key)
+
+	// Set the new value
+	if err := cm.koanf.Set(key, value); err != nil {
+		return fmt.Errorf("failed to set config value in koanf: %w", err)
+	}
+
+	// Find the nearest struct that needs updating
+	structKey := cm.findNearestStructKey(key)
+
+	// If synchronization is enabled and key should be synced, push the change
+	if cm.syncMgr != nil && cm.shouldSyncKey(key) {
+		// Push to sync manager and fire event on success
+		err := cm.syncMgr.Push(ctx, key, value, func(sKey string, sValue any) {
+			if structKey == "" {
+				// No struct association - simple key/value update
+				cm.notifySubscribers(sKey, oldValue, sValue)
+			} else {
+				// Update and validate the associated struct
+				newStruct, err := cm.getIntoStruct(structKey, nil)
+				if err != nil {
+					cm.logger.Error("failed to decode struct for key %s", zap.String("key", structKey), zap.Error(err))
+					// Revert the change if validation fails
+					_ = cm.koanf.Set(key, oldValue)
+					return
+				}
+
+				// Validate the entire struct
+				if err := cm.validateValue(structKey, newStruct); err != nil {
+					// Revert the change if validation fails
+					_ = cm.koanf.Set(key, oldValue)
+					cm.logger.Error("validation failed for struct %s", zap.String("key", structKey), zap.Error(err))
+					return
+				}
+
+				// Notify with the updated struct
+				cm.notifySubscribers(structKey, oldValue, newStruct)
+			}
+		})
+		if err != nil {
+			cm.logger.Error("failed to push config to sync manager after local set",
+				zap.String("key", key),
+				zap.Error(err))
+			return fmt.Errorf("failed to push config to sync manager: %w", err)
+		}
+	} else {
+		if structKey == "" {
+			// No struct association - simple key/value update
+			cm.notifySubscribers(key, oldValue, value)
+		} else {
+			// Update and validate the associated struct
+			newStruct, err := cm.getIntoStruct(structKey, nil)
+			if err != nil {
+				return fmt.Errorf("failed to decode struct for key %s: %w", structKey, err)
+			}
+
+			// Validate the entire struct
+			if err := cm.validateValue(structKey, newStruct); err != nil {
+				// Revert the change if validation fails
+				_ = cm.koanf.Set(key, oldValue)
+				return fmt.Errorf("validation failed for struct %s: %w", structKey, err)
+			}
+
+			// Notify with the updated struct
+			cm.notifySubscribers(structKey, oldValue, newStruct)
+		}
+	}
+
+	return nil
+}
+
+// getFilteredKeys returns keys filtered by prefixes if provided, otherwise all keys
+func (cm *ConfigManagerDefault) getFilteredKeys(keyPrefix ...string) []string {
+	if len(keyPrefix) == 0 {
+		return cm.koanf.Keys()
+	}
+
+	allKeys := cm.koanf.Keys()
+	return lo.FlatMap(keyPrefix, func(prefix string, _ int) []string {
+		return lo.Filter(allKeys, func(key string, _ int) bool {
+			return strings.HasPrefix(key, prefix+keySeparator)
+		})
+	})
+}
+
+// Validate validates the configuration. If keyPrefix is provided, only validates
+// keys starting with that prefix. If no prefix is provided, validates the entire config at root level.
+// Returns an error if any requested keys don't exist.
+func (cm *ConfigManagerDefault) Validate(keyPrefix ...string) error {
+	var errs []error
+
+	if len(keyPrefix) > 0 {
+		// First check if all requested prefixes have matching keys
+		keys := cm.getFilteredKeys(keyPrefix...)
+		if len(keys) == 0 {
+			if len(keyPrefix) == 1 {
+				return fmt.Errorf("configuration key '%s' not found", keyPrefix[0])
+			}
+			return fmt.Errorf("no configuration keys found matching prefixes: %v", keyPrefix)
+		}
+
+		// Validate specific keys when prefixes are provided
+		for _, key := range keys {
+			if err := cm.validateConfig(key); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", key, err))
+			}
+		}
+	} else {
+		// Validate entire config at root level when no prefixes are provided
+		if err := cm.validateConfig(""); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("configuration validation failed: %v", errs)
+	}
+	return nil
+}
+
+func (cm *ConfigManagerDefault) validateConfig(key string) error {
+	if key == "" {
+		// For root validation, use the entire config
+		return cm.validateValue(key, cm.All())
+	}
+
+	// First check if the key exists in the configuration
+	if !cm.Exists(key) {
+		return fmt.Errorf("configuration key '%s' not found", key)
+	}
+
+	// Check if we have a registered struct for this key
+	if cm.hasConfigStruct(key) {
+		cfg, err := cm.Get(key)
+		if err != nil {
+			return fmt.Errorf("failed to get config for validation: %w", err)
+		}
+		return cm.validateValue(key, cfg)
+	}
+
+	// Try to find the nearest parent key with a registered struct
+	parentKey := cm.findNearestStructKey(key)
+	if parentKey == "" {
+		// No parent struct, just validate the raw value
+		return cm.validateValue(key, cm.koanf.Get(key))
+	}
+
+	// Get the parent struct (decoded into its registered type) and validate it
+	var parentStruct any
+	parentStruct, err := cm.Get(parentKey, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get parent config for validation: %w", err)
+	}
+
+	// Validate the parent struct which will include our key
+	return cm.validateValue(parentKey, parentStruct)
+}
+
+func (cm *ConfigManagerDefault) validateValue(key string, val any) error {
+	// First check for advanced Validator implementation
+	if validator, ok := val.(Validator); ok {
+		if err := validator.Validate(); err != nil {
+			cm.logger.Error("Configuration validation error",
+				zap.String("config_key", key),
+				zap.Error(err))
+			return fmt.Errorf("%s: %w", key, err)
+		}
+	}
+
+	// Validate using zog schema if available
+	if provider, ok := val.(ConfigSchemaProvider); ok {
+		cm.logger.Debug("Found ConfigSchemaProvider implementation", zap.String("key", key))
+		if schema := provider.Schema(); schema != nil {
+			if err := cm.schemaValidate(key, val, schema); err != nil {
+				cm.logger.Error("Schema validation failed",
+					zap.String("key", key),
+					zap.Error(err))
+				return err
+			}
+		}
+	}
+
+	cm.logger.Debug("Validation passed", zap.String("key", key))
+	return nil
+}
+func (cm *ConfigManagerDefault) schemaValidate(key string, value any, schema zog.ZogSchema) error {
+	var issues zog.ZogIssueMap
+
+	switch v := schema.(type) {
+	case *zog.StructSchema:
+		// Struct schemas return issue maps
+		issues = v.Validate(value)
+	case *zog.PointerSchema:
+		// Pointer schemas return issue maps
+		issues = v.Validate(value)
+	default:
+		err := fmt.Errorf("unsupported schema type for validation: %T", schema)
+		cm.logger.Error("Configuration schema validation error",
+			zap.String("config_key", key),
+			zap.Error(err))
+		return err
+	}
+
+	if len(issues) > 0 {
+		// Convert issues to sanitized error messages
+		sanitized := zog.Issues.SanitizeMap(issues)
+		var errs []error
+		for path, messages := range sanitized {
+			fullPath := key
+			if path != schemaValidationRootPath {
+				fullPath = fmt.Sprintf("%s.%s", key, path)
+			}
+			for _, msg := range messages {
+				errs = append(errs, fmt.Errorf("%s: %s", fullPath, msg))
+			}
+		}
+		// Collect the issues for reuse
+		zog.Issues.CollectMap(issues)
+		return fmt.Errorf("configuration validation failed for %s: %v", key, errs)
+	}
+	return nil
+}
+
+// Persist persists the configuration by delegating to ConfigSource implementations.
+func (cm *ConfigManagerDefault) Persist(keyPrefix ...string) error {
+	var accumulatedError error
+	for _, _source := range cm.sources {
+		// Check if the source is persistable
+		if ps, ok := _source.(source.PersistableConfigSource); ok {
+			keys := cm.getFilteredKeys(keyPrefix...)
+
+			persistKeys := lo.Reject(keys, func(key string, _ int) bool {
+				return cm.isVolatile(key)
+			})
+
+			if len(persistKeys) > 0 {
+				if err := ps.Persist(cm.koanf, persistKeys...); err != nil {
+					cm.logger.Error("failed to persist config for a source", zap.Error(err))
+					if accumulatedError == nil {
+						accumulatedError = fmt.Errorf("error persisting source: %w", err)
+					} else {
+						accumulatedError = fmt.Errorf("%v; error persisting another source: %w", accumulatedError, err)
+					}
+				}
+			}
+		}
+	}
+	return accumulatedError
+}
+
+// Shutdown shuts down the ConfigManagerDefault.
+func (cm *ConfigManagerDefault) Shutdown() error {
+	// Stop all config source watchers
+	errs := lo.FilterMap(cm.sources, func(_source source.ConfigSource, _ int) (error, bool) {
+		if stoppable, ok := _source.(source.StoppableConfigSource); ok {
+			if err := stoppable.Stop(); err != nil {
+				cm.logger.Error("failed to stop config watcher",
+					zap.String("source", fmt.Sprintf("%T", _source)),
+					zap.Error(err))
+				return fmt.Errorf("failed to stop config watcher: %w", err), true
+			}
+		}
+		return nil, false
+	})
+
+	// Stop sync manager if configured
+	if cm.syncMgr != nil {
+		if err := cm.syncMgr.Stop(); err != nil {
+			cm.logger.Error("failed to stop sync manager during shutdown", zap.Error(err))
+			errs = append(errs, fmt.Errorf("failed to stop sync manager: %w", err))
+		}
+	}
+
+	return lo.Ternary(len(errs) > 0,
+		fmt.Errorf("shutdown encountered errors: %v", errs),
+		nil)
+}
+
+// isVolatile checks if a configuration key is marked as volatile.
+// Volatile keys are not persisted to durable storage.
+func (cm *ConfigManagerDefault) isVolatile(key string) bool {
+	return cm.flagManager.HasFlag(key, "volatile")
+}
+
+// hasConfigStruct checks if a key has a registered config struct
+func (cm *ConfigManagerDefault) hasConfigStruct(key string) bool {
+	cm.configStructLock.RLock()
+	defer cm.configStructLock.RUnlock()
+	_, ok := cm.configStructs[key]
+	return ok
+}
+
+// implementsInterface checks if a registered struct implements an interface
+func (cm *ConfigManagerDefault) implementsInterface(key string, iface reflect.Type) bool {
+	cm.configStructLock.RLock()
+	defer cm.configStructLock.RUnlock()
+
+	structType, ok := cm.configStructs[key]
+	if !ok {
+		return false
+	}
+
+	return ireflect.ImplementsInterface(structType, iface)
+}
+
+// implementsValidator checks if a registered struct implements Validator
+func (cm *ConfigManagerDefault) implementsValidator(key string) bool {
+	cm.configStructLock.RLock()
+	defer cm.configStructLock.RUnlock()
+
+	structType, ok := cm.configStructs[key]
+	if !ok {
+		return false
+	}
+
+	return ireflect.ImplementsValidator(structType)
+}
+
+// implementsConfigSchemaProvider checks if a registered struct implements ConfigSchemaProvider
+func (cm *ConfigManagerDefault) implementsConfigSchemaProvider(key string) bool {
+	cm.configStructLock.RLock()
+	defer cm.configStructLock.RUnlock()
+
+	structType, ok := cm.configStructs[key]
+	if !ok {
+		return false
+	}
+
+	return ireflect.ImplementsConfigSchemaProvider(structType)
+}
+
+// implementsConfigDefaults checks if a registered struct implements ConfigDefaults
+func (cm *ConfigManagerDefault) implementsConfigDefaults(key string) bool {
+	cm.configStructLock.RLock()
+	defer cm.configStructLock.RUnlock()
+
+	structType, ok := cm.configStructs[key]
+	if !ok {
+		return false
+	}
+
+	return ireflect.ImplementsConfigDefaults(structType)
+}
+
+// GetRegisteredStructs returns a copy of the registered config structs
+func (cm *ConfigManagerDefault) GetRegisteredStructs() map[string]reflect.Type {
+	cm.configStructLock.RLock()
+	defer cm.configStructLock.RUnlock()
+
+	copy := make(map[string]reflect.Type, len(cm.configStructs))
+	for k, v := range cm.configStructs {
+		copy[k] = v
+	}
+	return copy
+}
+
+// findNearestStructKey finds the nearest parent key that has a registered struct
+func (cm *ConfigManagerDefault) findNearestStructKey(key string) string {
+	parts := strings.Split(key, keySeparator)
+	for i := len(parts); i > 0; i-- {
+		potentialKey := strings.Join(parts[:i], keySeparator)
+		if cm.hasConfigStruct(potentialKey) {
+			return potentialKey
+		}
+	}
+	return ""
+}
+
+// ListKeys returns all configuration keys matching the given prefix
+func (cm *ConfigManagerDefault) ListKeys(prefix string) []string {
+	return cm.getFilteredKeys(prefix)
+}
+
+// ConfigFile returns the path to the configuration file
+func (cm *ConfigManagerDefault) ConfigFile() string {
+	return cm.configFile
+}
+
+// ConfigDir returns the path to the configuration directory
+func (cm *ConfigManagerDefault) ConfigDir() string {
+	return cm.configDir
+}
+
+// shouldSyncKey checks if a configuration key should be synchronized.
+// Only non-volatile keys that are marked for sync should be synchronized.
+func (cm *ConfigManagerDefault) shouldSyncKey(key string) bool {
+	return !cm.isVolatile(key) && cm.flagManager.HasFlag(key, "sync")
+}
+
+// RegisterNamespace associates a ConfigSource with a namespace
+func (cm *ConfigManagerDefault) RegisterNamespace(namespace string, src source.ConfigSource) {
+	cm.registry.Register(namespace, src)
+}
+
+// UnregisterNamespace removes a namespace from the registry and stops watching its source
+func (cm *ConfigManagerDefault) UnregisterNamespace(namespace string) error {
+	// Get the source before unregistering
+	src, ok := cm.registry.GetSource(namespace)
+	if !ok {
+		return fmt.Errorf("namespace %s not found", namespace)
+	}
+
+	// Stop watching if the source supports it
+	if stoppable, ok := src.(source.StoppableConfigSource); ok {
+		if err := stoppable.Stop(); err != nil {
+			cm.logger.Error("failed to stop config source watcher",
+				zap.String("namespace", namespace),
+				zap.Error(err))
+			return fmt.Errorf("failed to stop source watcher: %w", err)
+		}
+	}
+
+	// Remove from registry
+	cm.registry.Unregister(namespace)
+
+	// Delete all keys under this namespace from the main koanf
+	cm.koanf.Delete(namespace)
+
+	return nil
+}
+
+// LoadNamespaces loads all registered namespaces
+func (cm *ConfigManagerDefault) LoadNamespaces() error {
+	for _, namespace := range cm.registry.ListNamespaces() {
+		if err := cm.LoadNamespace(namespace); err != nil {
+			return fmt.Errorf("failed to load namespace %s: %w", namespace, err)
+		}
+	}
+	return nil
+}
+
+// LoadNamespace loads configuration for a specific namespace
+func (cm *ConfigManagerDefault) LoadNamespace(namespace string) error {
+	src, ok := cm.registry.GetSource(namespace)
+	if !ok {
+		return fmt.Errorf("namespace %s not registered", namespace)
+	}
+
+	// Create a temporary Koanf instance for this namespace
+	tmpKoanf := koanf.New(cm.koanf.Delim())
+
+	// Load the source
+	if err := src.Load(context.Background(), tmpKoanf); err != nil {
+		return fmt.Errorf("failed to load namespace %s: %w", namespace, err)
+	}
+
+	// Merge into main Koanf at the namespace path
+	if err := cm.koanf.MergeAt(tmpKoanf, namespace); err != nil {
+		return fmt.Errorf("failed to merge namespace %s: %w", namespace, err)
+	}
+
+	// Register the source for watching
+	if err := src.Watch(context.Background(), tmpKoanf, func(changedKeys []string, err error) {
+		cm.handleConfigChanges(src, changedKeys)
+	}); err != nil {
+		cm.logger.Warn("failed to start namespace watcher",
+			zap.String("namespace", namespace),
+			zap.Error(err))
+	}
+
+	return nil
+}
