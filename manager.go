@@ -877,6 +877,11 @@ func (cm *ConfigManagerDefault) implementsConfigDefaults(key string) bool {
 	return ireflect.ImplementsConfigDefaults(structType)
 }
 
+// FlagManager returns the flag manager instance
+func (cm *ConfigManagerDefault) FlagManager() FlagManager {
+	return cm.flagManager
+}
+
 // GetRegisteredStructs returns a copy of the registered config structs
 func (cm *ConfigManagerDefault) GetRegisteredStructs() map[string]reflect.Type {
 	cm.configStructLock.RLock()
