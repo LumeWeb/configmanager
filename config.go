@@ -29,6 +29,9 @@ type Manager interface {
 	Validate(keyPrefix ...string) error
 	Persist(keyPrefix ...string) error
 
+	// Flag management
+	FlagManager() FlagManager
+
 	// Configuration access
 	Get(key string, target ...any) (any, error)
 	GetString(key string) (string, error)
