@@ -372,15 +372,38 @@ func (cm *ConfigManagerDefault) getIntoStruct(key string, target any) (any, erro
 	// Create new instance if target is nil
 	var cfg any
 	if target == nil {
-		cfg = reflect.New(structType).Interface()
+		if structType.Kind() == reflect.Ptr {
+			cfg = reflect.New(structType.Elem()).Interface()
+		} else {
+			cfg = reflect.New(structType).Interface()
+		}
 	} else {
-		// Verify target matches registered type
+		// Get the actual type of target (handling pointers)
 		targetType := reflect.TypeOf(target)
-		if targetType.Kind() != reflect.Ptr || targetType.Elem() != structType {
+		
+		// Allow both pointer and value targets as long as underlying type matches
+		var targetElemType reflect.Type
+		if targetType.Kind() == reflect.Ptr {
+			targetElemType = targetType.Elem()
+		} else {
+			targetElemType = targetType
+		}
+
+		// Check if registered type matches target type (handling both pointer and value cases)
+		if targetElemType != structType && 
+		   !(structType.Kind() == reflect.Ptr && structType.Elem() == targetElemType) {
 			return nil, fmt.Errorf("target type %v does not match registered type %v",
 				targetType, structType)
 		}
-		cfg = target
+
+		// If target is non-pointer but registered type is pointer, create new pointer
+		if targetType.Kind() != reflect.Ptr && structType.Kind() == reflect.Ptr {
+			newPtr := reflect.New(targetType)
+			newPtr.Elem().Set(reflect.ValueOf(target))
+			cfg = newPtr.Interface()
+		} else {
+			cfg = target
+		}
 	}
 
 
