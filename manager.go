@@ -337,7 +337,12 @@ func (cm *ConfigManagerDefault) Get(key string, target ...any) (any, error) {
 
 	var fullKey string
 	if nsSource.Namespace != "" {
-		fullKey = nsSource.Namespace + cm.koanf.Delim() + namespacedKey
+		if namespacedKey == "" {
+			// If the key exactly matches a namespace, use it directly
+			fullKey = nsSource.Namespace
+		} else {
+			fullKey = nsSource.Namespace + cm.koanf.Delim() + namespacedKey
+		}
 	} else {
 		fullKey = key
 	}

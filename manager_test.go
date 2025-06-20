@@ -758,6 +758,75 @@ func (i *invalidSource) Watch(ctx context.Context, k *koanf.Koanf, cb source.Wat
 	return nil
 }
 
+func TestConfigManager_NamespaceKeyHandling(t *testing.T) {
+	// Create a namespace that matches exactly one of our test keys
+	ns := "plugin.test_plugin.protocol"
+	memSource := source.NewMemoryConfigSource(map[string]any{
+		ns: "http",
+		"other.key": "value",
+	})
+
+	cm, err := NewConfigManager([]source.ConfigSource{memSource})
+	require.NoError(t, err)
+	
+	// Register the namespace
+	cm.RegisterNamespace(ns, memSource)
+	require.NoError(t, cm.Load())
+
+	tests := []struct {
+		name        string
+		key         string
+		wantErr     bool
+		wantValue   any
+		errContains string
+	}{
+		{
+			name:      "exact namespace match",
+			key:       ns,
+			wantValue: "http",
+		},
+		{
+			name:      "nested key under namespace",
+			key:       ns + ".subkey",
+			wantErr:   true,
+			errContains: "not found",
+		},
+		{
+			name:        "double dot at end",
+			key:         ns + "..",
+			wantErr:     true,
+			errContains: "not found",
+		},
+		{
+			name:        "double dot in middle",
+			key:         "plugin..test_plugin.protocol",
+			wantErr:     true,
+			errContains: "not found",
+		},
+		{
+			name:      "non-namespaced key",
+			key:       "other.key",
+			wantValue: "value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			val, err := cm.Get(tt.key)
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+				assert.Nil(t, val)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.wantValue, val)
+			}
+		})
+	}
+}
+
 func TestConfigManager_ValidateWithZogSchema(t *testing.T) {
 	cm, _ := NewConfigManager([]source.ConfigSource{})
 	logger := zap.NewNop()
