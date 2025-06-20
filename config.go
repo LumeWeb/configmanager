@@ -33,7 +33,7 @@ type Manager interface {
 	FlagManager() FlagManager
 
 	// Configuration access
-	Get(key string, target ...any) (any, error)
+	Get(key string, target ...any) (any, any, error)
 	GetString(key string) (string, error)
 	GetInt(key string) (int64, error)
 	GetBool(key string) (bool, error)

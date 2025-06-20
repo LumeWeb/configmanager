@@ -276,7 +276,7 @@ func (cm *ConfigManagerDefault) Load() error {
 
 // GetString returns the string value for the given key.
 func (cm *ConfigManagerDefault) GetString(key string) (string, error) {
-	val, err := cm.Get(key)
+	val, _, err := cm.Get(key)
 	if err != nil {
 		return "", err
 	}
@@ -285,7 +285,7 @@ func (cm *ConfigManagerDefault) GetString(key string) (string, error) {
 
 // GetInt returns the int64 value for the given key.
 func (cm *ConfigManagerDefault) GetInt(key string) (int64, error) {
-	val, err := cm.Get(key)
+	val, _, err := cm.Get(key)
 	if err != nil {
 		return 0, err
 	}
@@ -294,7 +294,7 @@ func (cm *ConfigManagerDefault) GetInt(key string) (int64, error) {
 
 // GetBool returns the bool value for the given key.
 func (cm *ConfigManagerDefault) GetBool(key string) (bool, error) {
-	val, err := cm.Get(key)
+	val, _, err := cm.Get(key)
 	if err != nil {
 		return false, err
 	}
@@ -303,7 +303,7 @@ func (cm *ConfigManagerDefault) GetBool(key string) (bool, error) {
 
 // GetDuration returns the time.Duration value for the given key.
 func (cm *ConfigManagerDefault) GetDuration(key string) (time.Duration, error) {
-	val, err := cm.Get(key)
+	val, _, err := cm.Get(key)
 	if err != nil {
 		return 0, err
 	}
@@ -312,7 +312,7 @@ func (cm *ConfigManagerDefault) GetDuration(key string) (time.Duration, error) {
 
 // GetStringSlice returns the []string value for the given key.
 func (cm *ConfigManagerDefault) GetStringSlice(key string) ([]string, error) {
-	val, err := cm.Get(key)
+	val, _, err := cm.Get(key)
 	if err != nil {
 		return nil, err
 	}
@@ -329,16 +329,17 @@ func (cm *ConfigManagerDefault) IsSet(ctx context.Context, key string) bool {
 }
 
 // Get returns the configuration value for the given key.
-// If target is provided and a struct is registered for the key, the value will be decoded into the target.
-// It prioritizes the most specific namespace when looking up keys.
-func (cm *ConfigManagerDefault) Get(key string, target ...any) (any, error) {
+// Returns:
+// - raw any: direct config value from koanf
+// - decoded any: populated struct if target provided, new struct instance if registered, otherwise same as raw
+// - error: if any occurred
+func (cm *ConfigManagerDefault) Get(key string, target ...any) (any, any, error) {
 	// Find the most specific namespace for this key
 	nsSource, namespacedKey := cm.registry.FindMostSpecificNamespace(key, cm.koanf.Delim())
 
 	var fullKey string
 	if nsSource.Namespace != "" {
 		if namespacedKey == "" {
-			// If the key exactly matches a namespace, use it directly
 			fullKey = nsSource.Namespace
 		} else {
 			fullKey = nsSource.Namespace + cm.koanf.Delim() + namespacedKey
@@ -347,16 +348,26 @@ func (cm *ConfigManagerDefault) Get(key string, target ...any) (any, error) {
 		fullKey = key
 	}
 
-	// Check if we should decode into a struct
-	if len(target) > 0 {
-		return cm.getIntoStruct(fullKey, target[0])
-	}
-
-	// Fall back to basic get
+	// Get raw value first
 	if !cm.koanf.Exists(fullKey) {
-		return nil, fmt.Errorf("configuration key '%s' not found", fullKey)
+		return nil, nil, fmt.Errorf("configuration key '%s' not found", fullKey)
 	}
-	return cm.koanf.Get(fullKey), nil
+	raw := cm.koanf.Get(fullKey)
+
+	// Handle struct decoding cases
+	switch {
+	case len(target) > 0:
+		// Decode into provided target
+		decoded, err := cm.getIntoStruct(fullKey, target[0])
+		return raw, decoded, err
+	case cm.hasConfigStruct(fullKey):
+		// Decode into new struct instance
+		decoded, err := cm.getIntoStruct(fullKey, nil)
+		return raw, decoded, err
+	default:
+		// No struct decoding needed
+		return raw, raw, nil
+	}
 }
 
 // getIntoStruct decodes configuration into a registered struct type (used by RegisterStruct)
@@ -380,7 +391,7 @@ func (cm *ConfigManagerDefault) getIntoStruct(key string, target any) (any, erro
 	} else {
 		// Get the actual type of target (handling pointers)
 		targetType := reflect.TypeOf(target)
-		
+
 		// Allow both pointer and value targets as long as underlying type matches
 		var targetElemType reflect.Type
 		if targetType.Kind() == reflect.Ptr {
@@ -390,8 +401,8 @@ func (cm *ConfigManagerDefault) getIntoStruct(key string, target any) (any, erro
 		}
 
 		// Check if registered type matches target type (handling both pointer and value cases)
-		if targetElemType != structType && 
-		   !(structType.Kind() == reflect.Ptr && structType.Elem() == targetElemType) {
+		if targetElemType != structType &&
+			!(structType.Kind() == reflect.Ptr && structType.Elem() == targetElemType) {
 			return nil, fmt.Errorf("target type %v does not match registered type %v",
 				targetType, structType)
 		}
@@ -405,7 +416,6 @@ func (cm *ConfigManagerDefault) getIntoStruct(key string, target any) (any, erro
 			cfg = target
 		}
 	}
-
 
 	hooks := []mapstructure.DecodeHookFunc{
 		mapstructure.StringToTimeDurationHookFunc(),
@@ -533,7 +543,13 @@ func (cm *ConfigManagerDefault) SetAtomic(ctx context.Context, updates map[strin
 			return fmt.Errorf("validation failed for struct %s: %w", structKey, err)
 		}
 
-		oldValue, _ := cm.Get(structKey)
+		oldValue, _, err := cm.Get(structKey)
+		if err != nil {
+			cm.logger.Error("failed to get old value for struct during atomic update",
+				zap.String("key", structKey),
+				zap.Error(err))
+			continue
+		}
 		cm.notifySubscribers(structKey, oldValue, newStruct)
 	}
 
@@ -694,7 +710,7 @@ func (cm *ConfigManagerDefault) validateConfig(key string) error {
 
 	// Check if we have a registered struct for this key
 	if cm.hasConfigStruct(key) {
-		cfg, err := cm.Get(key)
+		cfg, _, err := cm.Get(key)
 		if err != nil {
 			return fmt.Errorf("failed to get config for validation: %w", err)
 		}
@@ -709,8 +725,7 @@ func (cm *ConfigManagerDefault) validateConfig(key string) error {
 	}
 
 	// Get the parent struct (decoded into its registered type) and validate it
-	var parentStruct any
-	parentStruct, err := cm.Get(parentKey, nil)
+	_, parentStruct, err := cm.Get(parentKey)
 	if err != nil {
 		return fmt.Errorf("failed to get parent config for validation: %w", err)
 	}

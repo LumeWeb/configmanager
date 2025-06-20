@@ -31,7 +31,7 @@ type Manager interface {
 	Configure(manager configManager, namespace string, opts ...SyncOption) error
 }
 type configManager interface {
-	Get(key string, target ...any) (any, error)
+	Get(string, ...any) (any, any, error)
 }
 
 type CManager = configManager

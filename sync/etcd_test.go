@@ -177,12 +177,12 @@ type mockConfigManager struct {
 	data map[string]any
 }
 
-func (m *mockConfigManager) Get(key string, target ...any) (any, error) {
+func (m *mockConfigManager) Get(key string, target ...any) (any, any, error) {
 	val, ok := m.data[key]
 	if !ok {
-		return nil, fmt.Errorf("key not found")
+		return nil, nil, fmt.Errorf("key not found")
 	}
-	return val, nil
+	return val, nil, nil
 }
 
 func (m *mockConfigManager) Start(ctx context.Context) error { return nil }
