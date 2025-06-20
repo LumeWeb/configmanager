@@ -216,6 +216,6 @@ func (m *mockManager) Push(ctx context.Context, key string, value any, callback 
 func (m *mockManager) Configure(manager configManager, namespace string) error {
 	return nil
 }
-func (m *mockManager) Get(key string, target ...any) (any, error) {
-	return nil, nil
+func (m *mockManager) Get(key string, target ...any) (any, any, error) {
+	return nil, nil, nil
 }

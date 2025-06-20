@@ -61,7 +61,7 @@ func (e *EtcdSyncClient) Configure(manager configManager, namespace string, opts
 
 	// Get etcd config from manager
 	var etcdConfig config.EtcdConfig
-	if _, err := manager.Get(namespace, &etcdConfig); err != nil {
+	if _, _, err := manager.Get(namespace, &etcdConfig); err != nil {
 		return fmt.Errorf("failed to get etcd config from manager: %w", err)
 	}
 

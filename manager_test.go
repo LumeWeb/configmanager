@@ -72,9 +72,10 @@ func TestNewConfigManager(t *testing.T) {
 	assert.NotNil(t, cm.configStructs)
 
 	// Verify memory source was loaded
-	val, err := cm.Get("test.key")
+	raw, decoded, err := cm.Get("test.key")
 	assert.NoError(t, err)
-	assert.Equal(t, "test_value", val)
+	assert.Equal(t, "test_value", raw)
+	assert.Equal(t, "test_value", decoded)
 }
 
 func TestConfigManager_WildcardSubscriptions(t *testing.T) {
@@ -210,31 +211,36 @@ func TestConfigManager_SetGetExists(t *testing.T) {
 	// Test Set and Get with string
 	err := cm.Set(context.Background(), "test.string", "test_value")
 	assert.NoError(t, err)
-	val, err := cm.Get("test.string")
+	raw, decoded, err := cm.Get("test.string")
 	assert.NoError(t, err)
-	assert.Equal(t, "test_value", val)
+	assert.Equal(t, "test_value", raw)
+	assert.Equal(t, "test_value", decoded)
 
 	// Test Set and Get with int
 	err = cm.Set(context.Background(), "test.int", 123)
 	assert.NoError(t, err)
-	val, err = cm.Get("test.int")
+	raw, decoded, err = cm.Get("test.int")
 	assert.NoError(t, err)
-	assert.Equal(t, 123, val)
+	assert.Equal(t, 123, raw)
+	assert.Equal(t, 123, decoded)
 
 	// Test Set and Get with bool
 	err = cm.Set(context.Background(), "test.bool", true)
 	assert.NoError(t, err)
-	val, err = cm.Get("test.bool")
+	raw, decoded, err = cm.Get("test.bool")
 	assert.NoError(t, err)
-	assert.Equal(t, true, val)
+	assert.Equal(t, true, raw)
+	assert.Equal(t, true, decoded)
 
 	// Test Exists
 	assert.True(t, cm.Exists("test.string"))
 	assert.False(t, cm.Exists("nonexistent.key"))
 
 	// Test Get non-existent key
-	_, err = cm.Get("nonexistent.key")
+	raw, decoded, err = cm.Get("nonexistent.key")
 	assert.Error(t, err)
+	assert.Nil(t, raw)
+	assert.Nil(t, decoded)
 }
 
 func TestConfigManager_All(t *testing.T) {
@@ -258,12 +264,14 @@ func TestConfigManager_RegisterStructGet(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Set values
-		cm.Set(context.Background(), "test.struct.string_value", "struct_string")
-		cm.Set(context.Background(), "test.struct.int_value", 456)
+		err = cm.Set(context.Background(), "test.struct.string_value", "struct_string")
+		assert.NoError(t, err)
+		err = cm.Set(context.Background(), "test.struct.int_value", 456)
+		assert.NoError(t, err)
 
 		// Get with pointer target
 		var targetCfg TestConfig
-		cfg, err := cm.Get("test.struct", &targetCfg)
+		_, cfg, err := cm.Get("test.struct", &targetCfg)
 		assert.NoError(t, err)
 		assert.IsType(t, &TestConfig{}, cfg)
 		assert.Equal(t, "struct_string", cfg.(*TestConfig).StringValue)
@@ -274,13 +282,15 @@ func TestConfigManager_RegisterStructGet(t *testing.T) {
 		err := cm.RegisterStruct("test.struct", TestConfig{})
 		assert.NoError(t, err)
 
-		cm.Set(context.Background(), "test.struct.string_value", "nil_target")
+		err = cm.Set(context.Background(), "test.struct.string_value", "nil_target")
+		assert.NoError(t, err)
 
 		// Get with nil target
-		cfg, err := cm.Get("test.struct", nil)
+		raw, decoded, err := cm.Get("test.struct", nil)
 		assert.NoError(t, err)
-		assert.IsType(t, &TestConfig{}, cfg)
-		assert.Equal(t, "nil_target", cfg.(*TestConfig).StringValue)
+		assert.IsType(t, map[string]interface{}{}, raw)
+		assert.IsType(t, &TestConfig{}, decoded)
+		assert.Equal(t, "nil_target", decoded.(*TestConfig).StringValue)
 	})
 
 	t.Run("value registration with value target", func(t *testing.T) {
@@ -288,11 +298,12 @@ func TestConfigManager_RegisterStructGet(t *testing.T) {
 		err := cm.RegisterStruct("test.struct", TestConfig{})
 		assert.NoError(t, err)
 
-		cm.Set(context.Background(), "test.struct.string_value", "value_target")
+		err = cm.Set(context.Background(), "test.struct.string_value", "value_target")
+		assert.NoError(t, err)
 
 		// This should fail since we can't set into a value target
 		var targetCfg TestConfig
-		_, err = cm.Get("test.struct", targetCfg)
+		_, _, err = cm.Get("test.struct", targetCfg)
 		assert.Error(t, err)
 	})
 
@@ -305,10 +316,11 @@ func TestConfigManager_RegisterStructGet(t *testing.T) {
 		cm.Set(context.Background(), "test.struct.string_value", "pointer_reg")
 
 		var targetCfg TestConfig
-		cfg, err := cm.Get("test.struct", &targetCfg)
+		raw, decoded, err := cm.Get("test.struct", &targetCfg)
 		assert.NoError(t, err)
-		assert.IsType(t, &TestConfig{}, cfg)
-		assert.Equal(t, "pointer_reg", cfg.(*TestConfig).StringValue)
+		assert.IsType(t, map[string]interface{}{}, raw)
+		assert.IsType(t, &TestConfig{}, decoded)
+		assert.Equal(t, "pointer_reg", decoded.(*TestConfig).StringValue)
 	})
 
 	t.Run("pointer registration with nil target", func(t *testing.T) {
@@ -316,12 +328,14 @@ func TestConfigManager_RegisterStructGet(t *testing.T) {
 		err := cm.RegisterStruct("test.struct", &TestConfig{})
 		assert.NoError(t, err)
 
-		cm.Set(context.Background(), "test.struct.string_value", "nil_ptr_target")
-
-		cfg, err := cm.Get("test.struct", nil)
+		err = cm.Set(context.Background(), "test.struct.string_value", "nil_ptr_target")
 		assert.NoError(t, err)
-		assert.IsType(t, &TestConfig{}, cfg)
-		assert.Equal(t, "nil_ptr_target", cfg.(*TestConfig).StringValue)
+
+		raw, decoded, err := cm.Get("test.struct", nil)
+		assert.NoError(t, err)
+		assert.IsType(t, map[string]interface{}{}, raw)
+		assert.IsType(t, &TestConfig{}, decoded)
+		assert.Equal(t, "nil_ptr_target", decoded.(*TestConfig).StringValue)
 	})
 
 	t.Run("type mismatch detection", func(t *testing.T) {
@@ -329,12 +343,18 @@ func TestConfigManager_RegisterStructGet(t *testing.T) {
 		err := cm.RegisterStruct("test.struct", TestConfig{})
 		assert.NoError(t, err)
 
+		// Set some data first
+		err = cm.Set(context.Background(), "test.struct.string_value", "test_value")
+		assert.NoError(t, err)
+		err = cm.Set(context.Background(), "test.struct.int_value", 123)
+		assert.NoError(t, err)
+
 		type MismatchConfig struct {
 			Different string `config:"different"`
 		}
 
 		var target MismatchConfig
-		_, err = cm.Get("test.struct", &target)
+		_, _, err = cm.Get("test.struct", &target)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "does not match registered type")
 	})
@@ -386,7 +406,7 @@ func TestConfigManager_TypeConversions(t *testing.T) {
 
 	// Get the struct
 	var cfg ConversionTestStruct
-	_, err = cm.Get("test.conversions", &cfg)
+	_, _, err = cm.Get("test.conversions", &cfg)
 	assert.NoError(t, err)
 
 	// Verify conversions
@@ -426,7 +446,7 @@ func TestConfigManager_NestedStructConversions(t *testing.T) {
 
 	// Get the struct
 	var cfg ParentStruct
-	_, err = cm.Get("test.nested", &cfg)
+	_, _, err = cm.Get("test.nested", &cfg)
 	assert.NoError(t, err)
 
 	// Verify conversions
@@ -467,9 +487,9 @@ func TestConfigManager_SetAtomic(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify values
-	val, _ := cm.Get("test.string")
+	val, _, _ := cm.Get("test.string")
 	assert.Equal(t, "updated_string", val)
-	val, _ = cm.Get("test.int")
+	val, _, _ = cm.Get("test.int")
 	assert.Equal(t, 456, val)
 }
 
@@ -575,9 +595,10 @@ func TestConfigManager_Validate(t *testing.T) {
 			"validation should fail with expected error")
 
 		// Verify the value was not changed by validation
-		val, err := cm.Get("test.always_invalid.value")
+		raw, decoded, err := cm.Get("test.always_invalid.value")
 		assert.NoError(t, err)
-		assert.Equal(t, "initial", val, "validation failure should not modify the value")
+		assert.Equal(t, "initial", raw, "validation failure should not modify the value")
+		assert.Equal(t, "initial", decoded, "validation failure should not modify the value")
 	})
 
 	t.Run("conditional validation - valid case", func(t *testing.T) {
@@ -812,13 +833,13 @@ func TestConfigManager_NamespaceKeyHandling(t *testing.T) {
 	// Create a namespace that matches exactly one of our test keys
 	ns := "plugin.test_plugin.protocol"
 	memSource := source.NewMemoryConfigSource(map[string]any{
-		ns: "http",
+		ns:          "http",
 		"other.key": "value",
 	})
 
 	cm, err := NewConfigManager([]source.ConfigSource{memSource})
 	require.NoError(t, err)
-	
+
 	// Register the namespace
 	cm.RegisterNamespace(ns, memSource)
 	require.NoError(t, cm.Load())
@@ -836,9 +857,9 @@ func TestConfigManager_NamespaceKeyHandling(t *testing.T) {
 			wantValue: "http",
 		},
 		{
-			name:      "nested key under namespace",
-			key:       ns + ".subkey",
-			wantErr:   true,
+			name:        "nested key under namespace",
+			key:         ns + ".subkey",
+			wantErr:     true,
 			errContains: "not found",
 		},
 		{
@@ -862,7 +883,7 @@ func TestConfigManager_NamespaceKeyHandling(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			val, err := cm.Get(tt.key)
+			val, _, err := cm.Get(tt.key)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errContains != "" {
@@ -903,9 +924,10 @@ func TestConfigManager_ValidateWithZogSchema(t *testing.T) {
 		assert.Contains(t, err.Error(), "valid") // Check for validation keyword
 
 		// Verify the invalid value wasn't actually set
-		val, err := cm.Get("test.schema.email")
+		raw, decoded, err := cm.Get("test.schema.email")
 		assert.NoError(t, err)
-		assert.NotEqual(t, "invalid-email", val)
+		assert.NotEqual(t, "invalid-email", raw)
+		assert.NotEqual(t, "invalid-email", decoded)
 	})
 
 	t.Run("weak password fails schema validation", func(t *testing.T) {
@@ -918,9 +940,10 @@ func TestConfigManager_ValidateWithZogSchema(t *testing.T) {
 		assert.Contains(t, err.Error(), "digit")     // Check for digit requirement
 
 		// Verify the invalid value wasn't actually set
-		val, err := cm.Get("test.schema.password")
+		raw, decoded, err := cm.Get("test.schema.password")
 		assert.NoError(t, err)
-		assert.NotEqual(t, "weak", val)
+		assert.NotEqual(t, "weak", raw)
+		assert.NotEqual(t, "weak", decoded)
 	})
 
 	t.Run("partial validation shows all errors", func(t *testing.T) {
@@ -943,12 +966,14 @@ func TestConfigManager_ValidateWithZogSchema(t *testing.T) {
 			"error should mention either uppercase or digit requirement")
 
 		// Verify original valid values remain unchanged
-		email, err := cm.Get("test.schema.email")
+		raw, decoded, err := cm.Get("test.schema.email")
 		assert.NoError(t, err)
-		assert.Equal(t, "valid@example.com", email)
+		assert.Equal(t, "valid@example.com", raw)
+		assert.Equal(t, "valid@example.com", decoded)
 
-		pass, err := cm.Get("test.schema.password")
+		raw, decoded, err = cm.Get("test.schema.password")
 		assert.NoError(t, err)
-		assert.Equal(t, "Valid1234", pass)
+		assert.Equal(t, "Valid1234", raw)
+		assert.Equal(t, "Valid1234", decoded)
 	})
 }
