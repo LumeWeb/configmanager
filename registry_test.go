@@ -1,25 +1,16 @@
 package configmanager
 
 import (
-	"context"
-	"github.com/knadh/koanf/v2"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"go.lumeweb.com/configmanager/source"
 )
 
-type mockSource struct{}
-
-func (m *mockSource) Load(ctx context.Context, k *koanf.Koanf) error { return nil }
-func (m *mockSource) Watch(ctx context.Context, k *koanf.Koanf, cb source.WatchOnChangeCallback) error {
-	return nil
-}
-
 func TestDefaultConfigRegistry(t *testing.T) {
 	t.Run("Register and GetSource", func(t *testing.T) {
 		reg := NewDefaultConfigRegistry()
-		src := &mockSource{}
+		src := source.NewMemoryConfigSource(nil)
 
 		reg.Register("test", src)
 		retrieved, ok := reg.GetSource("test")
@@ -36,7 +27,7 @@ func TestDefaultConfigRegistry(t *testing.T) {
 
 	t.Run("Unregister", func(t *testing.T) {
 		reg := NewDefaultConfigRegistry()
-		src := &mockSource{}
+		src := source.NewMemoryConfigSource(nil)
 
 		reg.Register("test", src)
 		reg.Unregister("test")
@@ -47,8 +38,8 @@ func TestDefaultConfigRegistry(t *testing.T) {
 
 	t.Run("ListNamespaces", func(t *testing.T) {
 		reg := NewDefaultConfigRegistry()
-		src1 := &mockSource{}
-		src2 := &mockSource{}
+		src1 := source.NewMemoryConfigSource(nil)
+		src2 := source.NewMemoryConfigSource(nil)
 
 		reg.Register("ns1", src1)
 		reg.Register("ns2", src2)
@@ -61,8 +52,8 @@ func TestDefaultConfigRegistry(t *testing.T) {
 
 	t.Run("FindMostSpecificNamespace", func(t *testing.T) {
 		reg := NewDefaultConfigRegistry()
-		src1 := &mockSource{}
-		src2 := &mockSource{}
+		src1 := source.NewMemoryConfigSource(nil)
+		src2 := source.NewMemoryConfigSource(nil)
 
 		reg.Register("parent", src1)
 		reg.Register("parent.child", src2)
@@ -100,7 +91,7 @@ func TestDefaultConfigRegistry(t *testing.T) {
 
 	t.Run("ConcurrentAccess", func(t *testing.T) {
 		reg := NewDefaultConfigRegistry()
-		src := &mockSource{}
+		src := source.NewMemoryConfigSource(nil)
 		done := make(chan bool)
 
 		go func() {

@@ -3,17 +3,15 @@ package source
 import (
 	"context"
 	"fmt"
-
-	"github.com/knadh/koanf/v2"
 )
 
 // ConfigSource abstracts the loading of configuration data from different sources.
 type ConfigSource interface {
-	// Load loads configuration data from a specific source into the Koanf instance.
-	Load(ctx context.Context, k *koanf.Koanf) error
+	// Load loads configuration data from a specific source into the config manager.
+	Load(ctx context.Context, cm configManager) error
 	// Watch watches for changes in the configuration source and triggers the onChange function with the keys that changed.
 	// If the source does not support watching, this method should return nil.
-	Watch(ctx context.Context, k *koanf.Koanf, onChange WatchOnChangeCallback) error
+	Watch(ctx context.Context, cm configManager, onChange WatchOnChangeCallback) error
 }
 
 // WatchAllChanges is a special value that indicates all configuration values may have changed.
@@ -54,5 +52,14 @@ func FindSourceByType[T ConfigSource](sources []ConfigSource) (T, error) {
 type PersistableConfigSource interface {
 	ConfigSource
 	// Persist writes configuration changes back to the source.
-	Persist(k *koanf.Koanf, keyPrefix ...string) error
+	Persist(cm configManager, keyPrefix ...string) error
+}
+type configManager interface {
+	Get(string, ...any) (any, any, error)
+	Exists(key string) bool
+	Set(ctx context.Context, key string, value any) error
+	Delete(key string)
+	Keys() []string
+	Delim() string
+	All() map[string]any
 }

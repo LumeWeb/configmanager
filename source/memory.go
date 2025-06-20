@@ -2,10 +2,10 @@ package source
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"go.uber.org/zap"
 	"sync"
-
-	"github.com/knadh/koanf/v2"
 )
 
 // MemoryConfigSource is an in-memory configuration source that can be used for testing
@@ -47,13 +47,13 @@ func WithMemorySourceLogger(logger *zap.Logger) MemoryConfigSourceOption {
 	}
 }
 
-// Load loads the in-memory configuration into the Koanf instance.
-func (m *MemoryConfigSource) Load(ctx context.Context, k *koanf.Koanf) error {
+// Load loads the in-memory configuration into the config manager.
+func (m *MemoryConfigSource) Load(ctx context.Context, cm configManager) error {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
 	for key, value := range m.data {
-		if err := k.Set(key, value); err != nil {
+		if err := cm.Set(ctx, key, value); err != nil {
 			return err
 		}
 	}
@@ -61,7 +61,7 @@ func (m *MemoryConfigSource) Load(ctx context.Context, k *koanf.Koanf) error {
 }
 
 // Watch registers a callback to be notified when changes occur.
-func (m *MemoryConfigSource) Watch(ctx context.Context, k *koanf.Koanf, cb WatchOnChangeCallback) error {
+func (m *MemoryConfigSource) Watch(ctx context.Context, cm configManager, cb WatchOnChangeCallback) error {
 	m.watchLock.Lock()
 	defer m.watchLock.Unlock()
 
@@ -70,14 +70,22 @@ func (m *MemoryConfigSource) Watch(ctx context.Context, k *koanf.Koanf, cb Watch
 		m.mutex.RLock()
 		if len(m.data) == 0 {
 			// Source was cleared - clear all keys from koanf
-			allKeys := k.Keys()
+			allKeys := cm.Keys()
+			var deleteErrs []error
 			for _, key := range allKeys {
-				k.Delete(key)
+				cm.Delete(key)
+				// Check if deletion failed (though Delete() doesn't return error)
+				if cm.Exists(key) {
+					deleteErrs = append(deleteErrs, fmt.Errorf("failed to delete key %s", key))
+				}
+			}
+			if len(deleteErrs) > 0 {
+				err = fmt.Errorf("failed to clear all keys: %w", errors.Join(deleteErrs...))
 			}
 		} else {
 			// Update koanf with current values
 			for key, value := range m.data {
-				if err := k.Set(key, value); err != nil {
+				if err := cm.Set(ctx, key, value); err != nil {
 					m.logger.Error("failed to update koanf value",
 						zap.String("key", key),
 						zap.Error(err))
@@ -126,6 +134,24 @@ func (m *MemoryConfigSource) Delete(key string) {
 	}
 }
 
+// DeleteFromManager deletes a key from the passed config manager and notifies watchers.
+func (m *MemoryConfigSource) DeleteFromManager(key string, cm configManager) {
+	m.mutex.Lock()
+	delete(m.data, key)
+	m.mutex.Unlock()
+
+	cm.Delete(key)
+
+	m.watchLock.Lock()
+	watchers := make([]WatchOnChangeCallback, len(m.watchers))
+	copy(watchers, m.watchers)
+	m.watchLock.Unlock()
+
+	for _, cb := range watchers {
+		cb([]string{key}, nil)
+	}
+}
+
 // Clear removes all data from the memory source.
 func (m *MemoryConfigSource) Clear() {
 	m.mutex.Lock()
@@ -147,7 +173,7 @@ func (m *MemoryConfigSource) Clear() {
 }
 
 // Persist implements PersistableConfigSource but does nothing since memory is ephemeral.
-func (m *MemoryConfigSource) Persist(ctx context.Context, k *koanf.Koanf, keyPrefix ...string) error {
+func (m *MemoryConfigSource) Persist(ctx context.Context, cm configManager, keyPrefix ...string) error {
 	// Memory source doesn't persist changes
 	return nil
 }

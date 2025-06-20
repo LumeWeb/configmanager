@@ -28,15 +28,25 @@ func NewFileConfigSource(path string) (*FileConfigSource, error) {
 	}, nil
 }
 
-// Load loads the configuration from the file into the Koanf instance.
-func (f *FileConfigSource) Load(ctx context.Context, k *koanf.Koanf) error {
-	// Use the file provider's Read() method which handles all the file operations
-	// including existence checks, reading, and parsing based on file extension
-	return k.Load(f.provider, nil)
+// Load loads the configuration from the file into the config manager.
+func (f *FileConfigSource) Load(ctx context.Context, cm configManager) error {
+	// Create temporary koanf to load file
+	tmpKoanf := koanf.New(".")
+	if err := tmpKoanf.Load(f.provider, nil); err != nil {
+		return err
+	}
+
+	// Set values through config manager to trigger validation
+	for key, value := range tmpKoanf.All() {
+		if err := cm.Set(ctx, key, value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Watch watches for changes in the file and triggers the onChange function when a change occurs.
-func (f *FileConfigSource) Watch(ctx context.Context, k *koanf.Koanf, onChange WatchOnChangeCallback) error {
+func (f *FileConfigSource) Watch(ctx context.Context, cm configManager, onChange WatchOnChangeCallback) error {
 	// Use the file provider's built-in Watch() functionality
 	return f.provider.Watch(func(event any, err error) {
 		if err != nil {
@@ -46,7 +56,7 @@ func (f *FileConfigSource) Watch(ctx context.Context, k *koanf.Koanf, onChange W
 		}
 
 		// Reload the config file on changes
-		if err := f.Load(ctx, k); err != nil {
+		if err := f.Load(ctx, cm); err != nil {
 			// Pass through the load error with WatchAllChanges to indicate
 			// the configuration may be in an inconsistent state
 			onChange([]string{WatchAllChanges}, fmt.Errorf("failed to reload config file: %w", err))

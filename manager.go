@@ -40,6 +40,7 @@ type ConfigManagerDefault struct {
 	tagName          string
 	registry         ConfigRegistry
 	syncConfigNS     string // Namespace for sync client configuration
+	delimiter        string // Custom delimiter for nested keys
 }
 
 // Ensure ConfigManagerDefault implements Manager interface
@@ -78,7 +79,7 @@ func (cm *ConfigManagerDefault) Subscribe(pattern string, callback SubscriptionC
 
 // reloadConfig reloads configuration from a source
 func (cm *ConfigManagerDefault) reloadConfig(ctx context.Context, source source.ConfigSource) error {
-	if err := source.Load(ctx, cm.koanf); err != nil {
+	if err := source.Load(ctx, cm); err != nil {
 		return fmt.Errorf("failed to reload config: %w", err)
 	}
 	return nil
@@ -92,7 +93,7 @@ func (cm *ConfigManagerDefault) handleConfigChanges(_source source.ConfigSource,
 
 	if len(changedKeys) == 1 && changedKeys[0] == source.WatchAllChanges {
 		// All config may have changed, reload the entire source
-		if err := _source.Load(context.Background(), cm.koanf); err != nil {
+		if err := _source.Load(context.Background(), cm); err != nil {
 			cm.logger.Error("Failed to reload configuration from source",
 				zap.String("source", fmt.Sprintf("%T", _source)),
 				zap.Error(err))
@@ -120,12 +121,12 @@ func (cm *ConfigManagerDefault) reloadKey(ctx context.Context, source source.Con
 
 	// Get the old value before updating
 	var oldValue any
-	if cm.koanf.Exists(key) {
-		oldValue = cm.koanf.Get(key)
+	if cm.Exists(key) {
+		oldValue, _, _ = cm.Get(key)
 	}
 
 	// Update the value in Koanf
-	if err := cm.koanf.Set(key, newValue); err != nil {
+	if err := cm.Set(ctx, key, newValue); err != nil {
 		return fmt.Errorf("failed to set new value for key %s in koanf: %w", key, err)
 	}
 
@@ -136,19 +137,17 @@ func (cm *ConfigManagerDefault) reloadKey(ctx context.Context, source source.Con
 }
 
 func (cm *ConfigManagerDefault) getKeyFromSource(ctx context.Context, source source.ConfigSource, key string) (any, error) {
-	// Create a temporary Koanf instance
-	tmpKoanf := koanf.New(".")
 
-	// Load only the specific key from the source into the temporary Koanf instance
-	if err := source.Load(ctx, tmpKoanf); err != nil {
+	// Load only the specific key from the source
+	if err := source.Load(ctx, cm); err != nil {
 		return nil, fmt.Errorf("failed to load config from source: %w", err)
 	}
 
-	// Get the value of the key from the temporary Koanf instance
-	if !tmpKoanf.Exists(key) {
+	// Get the value of the key
+	if !cm.Exists(key) {
 		return nil, fmt.Errorf("key %s not found in source", key)
 	}
-	return tmpKoanf.Get(key), nil
+	return cm.koanf.Get(key), nil
 }
 
 func (cm *ConfigManagerDefault) notifySubscribers(key string, oldValue any, newValue any) {
@@ -165,12 +164,22 @@ func (cm *ConfigManagerDefault) notifySubscribers(key string, oldValue any, newV
 	}
 }
 
+// WithDelimiter sets the delimiter used for nested keys in the configuration manager.
+func WithDelimiter(delimiter string) ConfigOption {
+	return func(cm *ConfigManagerDefault) error {
+		cm.delimiter = delimiter
+		cm.koanf = koanf.New(delimiter)
+		return nil
+	}
+}
+
 // NewConfigManager creates a new ConfigManagerDefault.
 // Sources can be:
 // - string paths (automatically wrapped as file sources)
 // - source.ConfigSource implementations
 // - []source.ConfigSource slice
 func NewConfigManager(sources any, opts ...ConfigOption) (*ConfigManagerDefault, error) {
+	// Create with default delimiter first
 	k := koanf.New(".")
 	eventMgr := event.NewManager[csync.ConfigEvent]("", event.UsePathMode)
 
@@ -257,12 +266,12 @@ func (cm *ConfigManagerDefault) SetupSync(opts ...ConfigOption) error {
 // Load loads the initial configuration from the configured sources.
 func (cm *ConfigManagerDefault) Load() error {
 	for _, _source := range cm.sources {
-		if err := _source.Load(context.Background(), cm.koanf); err != nil {
+		if err := _source.Load(context.Background(), cm); err != nil {
 			return fmt.Errorf("failed to load config from source: %w", err)
 		}
 
 		// Start watching for changes if the source supports it
-		if err := _source.Watch(context.Background(), cm.koanf, func(changedKeys []string, err error) {
+		if err := _source.Watch(context.Background(), cm, func(changedKeys []string, err error) {
 			cm.handleConfigChanges(_source, changedKeys)
 		}); err != nil {
 			cm.logger.Warn("failed to start config watcher",
@@ -324,7 +333,7 @@ func (cm *ConfigManagerDefault) IsSet(ctx context.Context, key string) bool {
 	if !cm.Exists(key) {
 		return false
 	}
-	val := cm.koanf.Get(key)
+	val, _, _ := cm.Get(key)
 	return !reflect.ValueOf(val).IsZero()
 }
 
@@ -335,14 +344,14 @@ func (cm *ConfigManagerDefault) IsSet(ctx context.Context, key string) bool {
 // - error: if any occurred
 func (cm *ConfigManagerDefault) Get(key string, target ...any) (any, any, error) {
 	// Find the most specific namespace for this key
-	nsSource, namespacedKey := cm.registry.FindMostSpecificNamespace(key, cm.koanf.Delim())
+	nsSource, namespacedKey := cm.registry.FindMostSpecificNamespace(key, cm.Delim())
 
 	var fullKey string
 	if nsSource.Namespace != "" {
 		if namespacedKey == "" {
 			fullKey = nsSource.Namespace
 		} else {
-			fullKey = nsSource.Namespace + cm.koanf.Delim() + namespacedKey
+			fullKey = nsSource.Namespace + cm.Delim() + namespacedKey
 		}
 	} else {
 		fullKey = key
@@ -514,7 +523,12 @@ func (cm *ConfigManagerDefault) SetAtomic(ctx context.Context, updates map[strin
 
 	// First pass: collect old values and identify affected structs
 	for key := range updates {
-		oldValues[key] = cm.koanf.Get(key)
+		raw, _, err := cm.Get(key)
+		if err != nil {
+			oldValues[key] = nil
+		} else {
+			oldValues[key] = raw
+		}
 		structKey := cm.findNearestStructKey(key)
 		if structKey != "" {
 			structKeys[structKey] = struct{}{}
@@ -523,7 +537,7 @@ func (cm *ConfigManagerDefault) SetAtomic(ctx context.Context, updates map[strin
 
 	// Second pass: apply all updates
 	for key, value := range updates {
-		if err := cm.koanf.Set(key, value); err != nil {
+		if err := cm.Set(ctx, key, value); err != nil {
 			return fmt.Errorf("failed to set config value for key %s: %w", key, err)
 		}
 	}
@@ -538,7 +552,7 @@ func (cm *ConfigManagerDefault) SetAtomic(ctx context.Context, updates map[strin
 		if err := cm.validateValue(structKey, newStruct); err != nil {
 			// Revert all changes if validation fails
 			for key, oldValue := range oldValues {
-				_ = cm.koanf.Set(key, oldValue)
+				_ = cm.Set(ctx, key, oldValue)
 			}
 			return fmt.Errorf("validation failed for struct %s: %w", structKey, err)
 		}
@@ -577,9 +591,9 @@ func (cm *ConfigManagerDefault) SetAtomic(ctx context.Context, updates map[strin
 // Set sets the configuration value for the given key.
 func (cm *ConfigManagerDefault) Set(ctx context.Context, key string, value any) error {
 	// Get the old value before updating
-	oldValue := cm.koanf.Get(key)
+	oldValue, _, _ := cm.Get(key)
 
-	// Set the new value
+	// Set the new value in koanf
 	if err := cm.koanf.Set(key, value); err != nil {
 		return fmt.Errorf("failed to set config value in koanf: %w", err)
 	}
@@ -598,7 +612,9 @@ func (cm *ConfigManagerDefault) Set(ctx context.Context, key string, value any) 
 				// Update and validate the associated struct
 				newStruct, err := cm.getIntoStruct(structKey, nil)
 				if err != nil {
-					cm.logger.Error("failed to decode struct for key %s", zap.String("key", structKey), zap.Error(err))
+					cm.logger.Error("failed to decode struct for key",
+						zap.String("key", structKey),
+						zap.Error(err))
 					// Revert the change if validation fails
 					_ = cm.koanf.Set(key, oldValue)
 					return
@@ -608,7 +624,9 @@ func (cm *ConfigManagerDefault) Set(ctx context.Context, key string, value any) 
 				if err := cm.validateValue(structKey, newStruct); err != nil {
 					// Revert the change if validation fails
 					_ = cm.koanf.Set(key, oldValue)
-					cm.logger.Error("validation failed for struct %s", zap.String("key", structKey), zap.Error(err))
+					cm.logger.Error("validation failed for struct",
+						zap.String("key", structKey),
+						zap.Error(err))
 					return
 				}
 
@@ -651,10 +669,10 @@ func (cm *ConfigManagerDefault) Set(ctx context.Context, key string, value any) 
 // getFilteredKeys returns keys filtered by prefixes if provided, otherwise all keys
 func (cm *ConfigManagerDefault) getFilteredKeys(keyPrefix ...string) []string {
 	if len(keyPrefix) == 0 {
-		return cm.koanf.Keys()
+		return cm.Keys()
 	}
 
-	allKeys := cm.koanf.Keys()
+	allKeys := cm.Keys()
 	return lo.FlatMap(keyPrefix, func(prefix string, _ int) []string {
 		return lo.Filter(allKeys, func(key string, _ int) bool {
 			return strings.HasPrefix(key, prefix+keySeparator)
@@ -721,7 +739,11 @@ func (cm *ConfigManagerDefault) validateConfig(key string) error {
 	parentKey := cm.findNearestStructKey(key)
 	if parentKey == "" {
 		// No parent struct, just validate the raw value
-		return cm.validateValue(key, cm.koanf.Get(key))
+		raw, _, err := cm.Get(key)
+		if err != nil {
+			return err
+		}
+		return cm.validateValue(key, raw)
 	}
 
 	// Get the parent struct (decoded into its registered type) and validate it
@@ -812,7 +834,7 @@ func (cm *ConfigManagerDefault) Persist(keyPrefix ...string) error {
 			})
 
 			if len(persistKeys) > 0 {
-				if err := ps.Persist(cm.koanf, persistKeys...); err != nil {
+				if err := ps.Persist(cm, persistKeys...); err != nil {
 					cm.logger.Error("failed to persist config for a source", zap.Error(err))
 					if accumulatedError == nil {
 						accumulatedError = fmt.Errorf("error persisting source: %w", err)
@@ -949,9 +971,36 @@ func (cm *ConfigManagerDefault) findNearestStructKey(key string) string {
 	return ""
 }
 
+// Keys returns all configuration keys
+func (cm *ConfigManagerDefault) Keys() []string {
+	return cm.koanf.Keys()
+}
+
 // ListKeys returns all configuration keys matching the given prefix
 func (cm *ConfigManagerDefault) ListKeys(prefix string) []string {
 	return cm.getFilteredKeys(prefix)
+}
+
+// Delete removes a configuration key and notifies watchers
+func (cm *ConfigManagerDefault) Delete(key string) {
+	// Get the old value before deleting
+	var oldValue any
+	if cm.Exists(key) {
+		oldValue = cm.koanf.Get(key)
+	}
+
+	cm.koanf.Delete(key)
+
+	// Notify watchers of the deletion
+	cm.notifySubscribers(key, oldValue, nil)
+}
+
+// Delim returns the delimiter used for nested keys
+func (cm *ConfigManagerDefault) Delim() string {
+	if cm.delimiter != "" {
+		return cm.delimiter
+	}
+	return cm.koanf.Delim()
 }
 
 // ConfigFile returns the path to the configuration file
@@ -991,14 +1040,14 @@ func (cm *ConfigManagerDefault) LoadSource(src source.ConfigSource, load bool, w
 
 	// Load the source if requested
 	if load {
-		if err := src.Load(context.Background(), cm.koanf); err != nil {
+		if err := src.Load(context.Background(), cm); err != nil {
 			return fmt.Errorf("failed to load source: %w", err)
 		}
 	}
 
 	// Start watching if requested and supported
 	if watch {
-		if err := src.Watch(context.Background(), cm.koanf, func(changedKeys []string, err error) {
+		if err := src.Watch(context.Background(), cm, func(changedKeys []string, err error) {
 			cm.handleConfigChanges(src, changedKeys)
 		}); err != nil {
 			cm.logger.Warn("failed to start watching source",
@@ -1033,7 +1082,7 @@ func (cm *ConfigManagerDefault) UnregisterNamespace(namespace string) error {
 	cm.registry.Unregister(namespace)
 
 	// Delete all keys under this namespace from the main koanf
-	cm.koanf.Delete(namespace)
+	cm.Delete(namespace)
 
 	return nil
 }
@@ -1055,21 +1104,13 @@ func (cm *ConfigManagerDefault) LoadNamespace(namespace string) error {
 		return fmt.Errorf("namespace %s not registered", namespace)
 	}
 
-	// Create a temporary Koanf instance for this namespace
-	tmpKoanf := koanf.New(cm.koanf.Delim())
-
-	// Load the source
-	if err := src.Load(context.Background(), tmpKoanf); err != nil {
+	// Load the source through config manager
+	if err := src.Load(context.Background(), cm); err != nil {
 		return fmt.Errorf("failed to load namespace %s: %w", namespace, err)
 	}
 
-	// Merge into main Koanf at the namespace path
-	if err := cm.koanf.MergeAt(tmpKoanf, namespace); err != nil {
-		return fmt.Errorf("failed to merge namespace %s: %w", namespace, err)
-	}
-
 	// Register the source for watching
-	if err := src.Watch(context.Background(), tmpKoanf, func(changedKeys []string, err error) {
+	if err := src.Watch(context.Background(), cm, func(changedKeys []string, err error) {
 		cm.handleConfigChanges(src, changedKeys)
 	}); err != nil {
 		cm.logger.Warn("failed to start namespace watcher",

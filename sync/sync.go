@@ -32,6 +32,11 @@ type Manager interface {
 }
 type configManager interface {
 	Get(string, ...any) (any, any, error)
+	Set(ctx context.Context, key string, value any) error
+	Delete(key string)
+	Keys() []string
+	Delim() string
+	All() map[string]any
 }
 
 type CManager = configManager

@@ -206,7 +206,9 @@ func TestDummySyncClient_Configure(t *testing.T) {
 	assert.Equal(t, "sync.config", client.configNS)
 }
 
-type mockManager struct{}
+type mockManager struct {
+	data map[string]any
+}
 
 func (m *mockManager) Start(ctx context.Context) error { return nil }
 func (m *mockManager) Stop() error                     { return nil }
@@ -218,4 +220,30 @@ func (m *mockManager) Configure(manager configManager, namespace string) error {
 }
 func (m *mockManager) Get(key string, target ...any) (any, any, error) {
 	return nil, nil, nil
+}
+func (m *mockManager) All() map[string]any {
+	if m.data == nil {
+		m.data = make(map[string]any)
+	}
+	return m.data
+}
+func (m *mockManager) Delete(key string) {
+	delete(m.data, key)
+}
+func (m *mockManager) Delim() string {
+	return "."
+}
+func (m *mockManager) Keys() []string {
+	keys := make([]string, 0, len(m.data))
+	for k := range m.data {
+		keys = append(keys, k)
+	}
+	return keys
+}
+func (m *mockManager) Set(ctx context.Context, key string, value any) error {
+	if m.data == nil {
+		m.data = make(map[string]any)
+	}
+	m.data[key] = value
+	return nil
 }

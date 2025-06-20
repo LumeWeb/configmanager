@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,11 +20,11 @@ func TestFileSourceWrapper_Load(t *testing.T) {
 		}()
 
 		f := NewFileSource(tmpFile).(*fileSourceWrapper)
-		k := koanf.New(".")
+		mgr := newMockManager()
 
-		err := f.Load(context.Background(), k)
+		err := f.Load(context.Background(), mgr)
 		require.NoError(t, err)
-		assert.Equal(t, "test_value", k.String("test.key"))
+		mgr.assertValue(t, "test.key", "test_value")
 	})
 
 	t.Run("load empty file", func(t *testing.T) {
@@ -37,18 +36,18 @@ func TestFileSourceWrapper_Load(t *testing.T) {
 		}()
 
 		f := NewFileSource(tmpFile).(*fileSourceWrapper)
-		k := koanf.New(".")
+		mgr := newMockManager()
 
-		err := f.Load(context.Background(), k)
+		err := f.Load(context.Background(), mgr)
 		require.NoError(t, err)
-		assert.Empty(t, k.Keys())
+		assert.Empty(t, mgr.Keys())
 	})
 
 	t.Run("load non-existent file", func(t *testing.T) {
 		f := NewFileSource("nonexistent.yaml").(*fileSourceWrapper)
-		k := koanf.New(".")
+		mgr := newMockManager()
 
-		err := f.Load(context.Background(), k)
+		err := f.Load(context.Background(), mgr)
 		require.Error(t, err)
 	})
 }
@@ -67,13 +66,13 @@ test.key3: initial
 		}()
 
 		f := NewFileSource(tmpFile).(*fileSourceWrapper)
-		k := koanf.New(".")
+		mgr := newMockManager()
 
-		err := f.Load(context.Background(), k)
+		err := f.Load(context.Background(), mgr)
 		require.NoError(t, err)
 
 		changeChan := make(chan []string, 1)
-		err = f.Watch(context.Background(), k, func(changedKeys []string, err error) {
+		err = f.Watch(context.Background(), mgr, func(changedKeys []string, err error) {
 			changeChan <- changedKeys
 		})
 		require.NoError(t, err)
@@ -90,9 +89,15 @@ test.key3: initial
 		select {
 		case keys := <-changeChan:
 			assert.Equal(t, []string{"test.key"}, keys)
-			assert.Equal(t, "updated", k.String("test.key"))
-			assert.Equal(t, "initial", k.String("test.key2"))
-			assert.Equal(t, "initial", k.String("test.key3"))
+			val1, _, err1 := mgr.Get("test.key")
+			val2, _, err2 := mgr.Get("test.key2")
+			val3, _, err3 := mgr.Get("test.key3")
+			require.NoError(t, err1)
+			require.NoError(t, err2)
+			require.NoError(t, err3)
+			assert.Equal(t, "updated", val1)
+			assert.Equal(t, "initial", val2)
+			assert.Equal(t, "initial", val3)
 		case <-time.After(2 * time.Second):
 			t.Fatal("timeout waiting for change notification")
 		}
@@ -108,13 +113,13 @@ test.key3: initial
 		}()
 
 		f := NewFileSource(tmpFile).(*fileSourceWrapper)
-		k := koanf.New(".")
+		mgr := newMockManager()
 
-		err := f.Load(context.Background(), k)
+		err := f.Load(context.Background(), mgr)
 		require.NoError(t, err)
 
 		changeChan := make(chan []string, 1)
-		err = f.Watch(context.Background(), k, func(changedKeys []string, err error) {
+		err = f.Watch(context.Background(), mgr, func(changedKeys []string, err error) {
 			changeChan <- changedKeys
 		})
 		require.NoError(t, err)
@@ -146,13 +151,13 @@ key4: v4
 		}()
 
 		f := NewFileSource(tmpFile, WithChangedThreshold(0.5)).(*fileSourceWrapper)
-		k := koanf.New(".")
+		mgr := newMockManager()
 
-		err := f.Load(context.Background(), k)
+		err := f.Load(context.Background(), mgr)
 		require.NoError(t, err)
 
 		changeChan := make(chan []string, 1)
-		err = f.Watch(context.Background(), k, func(changedKeys []string, err error) {
+		err = f.Watch(context.Background(), mgr, func(changedKeys []string, err error) {
 			changeChan <- changedKeys
 		})
 		require.NoError(t, err)
@@ -189,13 +194,13 @@ key4: v4
 		}()
 
 		f := NewFileSource(tmpFile, WithChangedThreshold(0.5)).(*fileSourceWrapper)
-		k := koanf.New(".")
+		mgr := newMockManager()
 
-		err := f.Load(context.Background(), k)
+		err := f.Load(context.Background(), mgr)
 		require.NoError(t, err)
 
 		changeChan := make(chan []string, 1)
-		err = f.Watch(context.Background(), k, func(changedKeys []string, err error) {
+		err = f.Watch(context.Background(), mgr, func(changedKeys []string, err error) {
 			changeChan <- changedKeys
 		})
 		require.NoError(t, err)
@@ -226,13 +231,13 @@ key4: v4
 		}(tmpFile)
 
 		f := NewFileSource(tmpFile, WithChangedThreshold(1)).(*fileSourceWrapper)
-		k := koanf.New(".")
+		mgr := newMockManager()
 
-		err := f.Load(context.Background(), k)
+		err := f.Load(context.Background(), mgr)
 		require.NoError(t, err)
 
 		changeChan := make(chan []string, 1)
-		err = f.Watch(context.Background(), k, func(changedKeys []string, err error) {
+		err = f.Watch(context.Background(), mgr, func(changedKeys []string, err error) {
 			changeChan <- changedKeys
 		})
 		require.NoError(t, err)
@@ -265,13 +270,13 @@ key2: v2
 		}()
 
 		f := NewFileSource(tmpFile, WithChangedThreshold(1)).(*fileSourceWrapper)
-		k := koanf.New(".")
+		mgr := newMockManager()
 
-		err := f.Load(context.Background(), k)
+		err := f.Load(context.Background(), mgr)
 		require.NoError(t, err)
 
 		changeChan := make(chan []string, 1)
-		err = f.Watch(context.Background(), k, func(changedKeys []string, err error) {
+		err = f.Watch(context.Background(), mgr, func(changedKeys []string, err error) {
 			changeChan <- changedKeys
 		})
 		require.NoError(t, err)
@@ -298,13 +303,13 @@ key2: v2
 		}()
 
 		f := NewFileSource(tmpFile, WithChangedThreshold(0.5)).(*fileSourceWrapper)
-		k := koanf.New(".")
+		mgr := newMockManager()
 
-		err := f.Load(context.Background(), k)
+		err := f.Load(context.Background(), mgr)
 		require.NoError(t, err)
 
 		changeChan := make(chan []string, 1)
-		err = f.Watch(context.Background(), k, func(changedKeys []string, err error) {
+		err = f.Watch(context.Background(), mgr, func(changedKeys []string, err error) {
 			changeChan <- changedKeys
 		})
 		require.NoError(t, err)
@@ -334,13 +339,13 @@ key2: v2
 		}()
 
 		f := NewFileSource(tmpFile, WithChangedThreshold(0.5)).(*fileSourceWrapper)
-		k := koanf.New(".")
+		mgr := newMockManager()
 
-		err := f.Load(context.Background(), k)
+		err := f.Load(context.Background(), mgr)
 		require.NoError(t, err)
 
 		changeChan := make(chan []string, 1)
-		err = f.Watch(context.Background(), k, func(changedKeys []string, err error) {
+		err = f.Watch(context.Background(), mgr, func(changedKeys []string, err error) {
 			changeChan <- changedKeys
 		})
 		require.NoError(t, err)
