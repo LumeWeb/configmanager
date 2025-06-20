@@ -67,6 +67,10 @@ type Manager interface {
 	LoadNamespaces() error
 	LoadNamespace(namespace string) error
 
+	// Source management
+	RegisterSource(src source.ConfigSource)
+	LoadSource(src source.ConfigSource, load bool, watch bool) error
+
 	// Sync management
 	SetupSync(opts ...ConfigOption) error
 }

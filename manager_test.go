@@ -702,6 +702,61 @@ func TestConfigManager_SetupSync(t *testing.T) {
 	})
 }
 
+func TestConfigManager_RegisterAndLoadSource(t *testing.T) {
+	cm := newTestManager()
+
+	// Create a new memory source with test data
+	testData := map[string]any{
+		"runtime.key": "runtime_value",
+		"runtime.num": 42,
+	}
+	memSource := source.NewMemoryConfigSource(testData)
+
+	// Register the source without loading
+	cm.RegisterSource(memSource)
+	assert.NotContains(t, cm.koanf.All(), "runtime.key")
+
+	// Now explicitly load and watch it
+	err := cm.LoadSource(memSource, true, true)
+	assert.NoError(t, err)
+
+	// Verify the new values are loaded
+	assert.Equal(t, "runtime_value", cm.koanf.Get("runtime.key"))
+	assert.Equal(t, 42, cm.koanf.Get("runtime.num"))
+
+	// Test watching by updating the source
+	updateChan := make(chan struct{})
+	cm.Subscribe("runtime.key", func(_ string) {
+		close(updateChan)
+	})
+
+	memSource.Set("runtime.key", "updated_value")
+
+	// Wait for update notification with timeout
+	select {
+	case <-updateChan:
+		assert.Equal(t, "updated_value", cm.koanf.Get("runtime.key"))
+	case <-time.After(1 * time.Second):
+		assert.Fail(t, "timeout waiting for config update")
+	}
+
+	// Test loading invalid source
+	invalidSource := &invalidSource{}
+	err = cm.LoadSource(invalidSource, true, false)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to load source")
+}
+
+type invalidSource struct{}
+
+func (i *invalidSource) Load(ctx context.Context, k *koanf.Koanf) error {
+	return fmt.Errorf("forced error")
+}
+
+func (i *invalidSource) Watch(ctx context.Context, k *koanf.Koanf, cb source.WatchOnChangeCallback) error {
+	return nil
+}
+
 func TestConfigManager_ValidateWithZogSchema(t *testing.T) {
 	cm, _ := NewConfigManager([]source.ConfigSource{})
 	logger := zap.NewNop()

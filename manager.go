@@ -932,6 +932,42 @@ func (cm *ConfigManagerDefault) RegisterNamespace(namespace string, src source.C
 	cm.registry.Register(namespace, src)
 }
 
+// RegisterSource adds a new configuration source at runtime without loading/watching it
+func (cm *ConfigManagerDefault) RegisterSource(src source.ConfigSource) {
+	// Check if source is already registered
+	if !lo.ContainsBy(cm.sources, func(s source.ConfigSource) bool {
+		return s == src
+	}) {
+		cm.sources = append(cm.sources, src)
+	}
+}
+
+// LoadSource loads and optionally watches a source, registering it first if needed
+func (cm *ConfigManagerDefault) LoadSource(src source.ConfigSource, load bool, watch bool) error {
+	cm.RegisterSource(src)
+
+	// Load the source if requested
+	if load {
+		if err := src.Load(context.Background(), cm.koanf); err != nil {
+			return fmt.Errorf("failed to load source: %w", err)
+		}
+	}
+
+	// Start watching if requested and supported
+	if watch {
+		if err := src.Watch(context.Background(), cm.koanf, func(changedKeys []string, err error) {
+			cm.handleConfigChanges(src, changedKeys)
+		}); err != nil {
+			cm.logger.Warn("failed to start watching source",
+				zap.String("source", fmt.Sprintf("%T", src)),
+				zap.Error(err))
+			return fmt.Errorf("failed to start watching source: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // UnregisterNamespace removes a namespace from the registry and stops watching its source
 func (cm *ConfigManagerDefault) UnregisterNamespace(namespace string) error {
 	// Get the source before unregistering
