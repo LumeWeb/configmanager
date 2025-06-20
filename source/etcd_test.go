@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.lumeweb.com/configmanager/config"
@@ -21,11 +20,14 @@ type etcdTestFixture struct {
 	mockWatcher *etcd.MockWatcher
 	etcdManager etcd.EtcdManager
 	source      *EtcdConfigSource
+	mgr         *mockManager
 }
 
 func setupEtcdTest(t *testing.T, initialData map[string]string) *etcdTestFixture {
 	ctx := context.Background()
 	logger := zap.NewNop()
+
+	mgr := newMockManager()
 
 	// Create mock etcd client
 	mockClient := etcd.NewMockEtcdClient([]string{"mock"})
@@ -68,6 +70,7 @@ func setupEtcdTest(t *testing.T, initialData map[string]string) *etcdTestFixture
 		mockWatcher: etcdManager.Watcher().(*etcd.MockWatcher),
 		etcdManager: etcdManager,
 		source:      source,
+		mgr:         mgr,
 	}
 }
 
@@ -79,24 +82,24 @@ func TestEtcdConfigSource(t *testing.T) {
 			"config/nested": `{"subkey":"subvalue"}`,
 		})
 
-		k := koanf.New(".")
-		err := f.source.Load(f.ctx, k)
+		mgr := newMockManager()
+		err := f.source.Load(f.ctx, mgr)
 		require.NoError(t, err)
 
 		// Verify loaded values
-		assert.Equal(t, "value1", k.String("key1"))
-		assert.Equal(t, 42, k.Int("key2"))
-		assert.Equal(t, "subvalue", k.String("nested.subkey"))
+		mgr.assertValue(t, "key1", "value1")
+		mgr.assertValue(t, "key2", 42)
+		mgr.assertValue(t, "nested.subkey", "subvalue")
 	})
 
 	t.Run("Watch", func(t *testing.T) {
 		f := setupEtcdTest(t, nil) // No initial data needed for this test
 
-		k := koanf.New(".")
+		mgr := newMockManager()
 		changeChan := make(chan []string, 1)
 
 		// Start watching
-		err := f.source.Watch(f.ctx, k, func(changedKeys []string, err error) {
+		err := f.source.Watch(f.ctx, mgr, func(changedKeys []string, err error) {
 			changeChan <- changedKeys
 		})
 		require.NoError(t, err)
@@ -112,7 +115,9 @@ func TestEtcdConfigSource(t *testing.T) {
 		select {
 		case changedKeys := <-changeChan:
 			assert.Equal(t, []string{"changed"}, changedKeys)
-			assert.Equal(t, "newvalue", k.String("changed.newkey"))
+			val, _, err := mgr.Get("changed.newkey")
+			require.NoError(t, err)
+			assert.Equal(t, "newvalue", val)
 
 		case <-time.After(1 * time.Second):
 			t.Fatal("timeout waiting for watch notification")
@@ -122,11 +127,10 @@ func TestEtcdConfigSource(t *testing.T) {
 	t.Run("Persist", func(t *testing.T) {
 		f := setupEtcdTest(t, nil) // No initial data needed for this test
 
-		k := koanf.New(".")
-		err := k.Set("key.to.persist", "persisted-value")
+		err := f.mgr.Set(f.ctx, "key.to.persist", "persisted-value")
 		require.NoError(t, err)
 
-		err = f.source.Persist(f.ctx, k, "key.to.persist")
+		err = f.source.Persist(f.ctx, f.mgr, "key.to.persist")
 		require.NoError(t, err)
 
 		// Verify value was persisted to etcd

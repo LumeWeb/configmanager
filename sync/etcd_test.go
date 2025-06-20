@@ -146,6 +146,14 @@ func TestEtcdSyncClient_Configure(t *testing.T) {
 
 type mockEtcdManager struct {
 	client etcd.EtcdClient
+	delim  string
+}
+
+func (m *mockEtcdManager) Delim() string {
+	if m.delim == "" {
+		return "."
+	}
+	return m.delim
 }
 
 func (m *mockEtcdManager) Client() etcd.EtcdClient {
@@ -174,7 +182,15 @@ func (m *mockEtcdManager) Close() error {
 }
 
 type mockConfigManager struct {
-	data map[string]any
+	data  map[string]any
+	delim string
+}
+
+func (m *mockConfigManager) Delim() string {
+	if m.delim == "" {
+		return "."
+	}
+	return m.delim
 }
 
 func (m *mockConfigManager) Get(key string, target ...any) (any, any, error) {
@@ -185,9 +201,36 @@ func (m *mockConfigManager) Get(key string, target ...any) (any, any, error) {
 	return val, nil, nil
 }
 
+func (m *mockConfigManager) All() map[string]any {
+	if m.data == nil {
+		m.data = make(map[string]any)
+	}
+	return m.data
+}
+
 func (m *mockConfigManager) Start(ctx context.Context) error { return nil }
 func (m *mockConfigManager) Stop() error                     { return nil }
 func (m *mockConfigManager) Push(ctx context.Context, key string, value any, callback PushCallback) error {
+	return nil
+}
+
+func (m *mockConfigManager) Delete(key string) {
+	delete(m.data, key)
+}
+
+func (m *mockConfigManager) Keys() []string {
+	keys := make([]string, 0, len(m.data))
+	for k := range m.data {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func (m *mockConfigManager) Set(ctx context.Context, key string, value any) error {
+	if m.data == nil {
+		m.data = make(map[string]any)
+	}
+	m.data[key] = value
 	return nil
 }
 

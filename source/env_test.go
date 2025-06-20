@@ -6,7 +6,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -119,15 +118,17 @@ func TestEnvConfigSource_Load(t *testing.T) {
 			setup(tt.envVars)
 			defer cleanup(tt.envVars)
 
-			k := koanf.New(tt.koanfDelim)
+			mgr := newMockManager(tt.koanfDelim)
 			source := NewEnvConfigSource(tt.prefix, tt.delimiter)
 
-			err := source.Load(ctx, k)
+			err := source.Load(ctx, mgr)
 			assert.NoError(t, err)
 
-			// Only check the keys we expect - ignore other env vars
-			for key, val := range tt.expected {
-				assert.Equal(t, val, k.Get(key), "Value for key '%s' should match", key)
+			// Verify values were set in the mock manager
+			for key, expectedVal := range tt.expected {
+				val, _, err := mgr.Get(key)
+				assert.NoError(t, err)
+				assert.Equal(t, expectedVal, val, "Value for key '%s' should match", key)
 			}
 		})
 	}
@@ -135,12 +136,12 @@ func TestEnvConfigSource_Load(t *testing.T) {
 
 func TestEnvConfigSource_Watch(t *testing.T) {
 	ctx := context.Background()
-	k := koanf.New(".")
+	mgr := newMockManager()
 	source := NewEnvConfigSource("TEST_", "_")
 
 	// Watch should be a no-op and not call the callback
 	// It should also return nil error
-	err := source.Watch(ctx, k, func(changedKeys []string, err error) {
+	err := source.Watch(ctx, mgr, func(changedKeys []string, err error) {
 		assert.Fail(t, "Watch callback should not be called for EnvConfigSource")
 	})
 	assert.NoError(t, err, "Watch should return nil and be a no-op")

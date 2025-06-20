@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/knadh/koanf/maps"
-	"github.com/knadh/koanf/v2"
 	ireflect "go.lumeweb.com/configmanager/internal/reflect"
 	"reflect"
 )
@@ -45,23 +44,23 @@ func NewDefaultConfigSource(manager manager, defaults map[string]any) *DefaultCo
 	}
 }
 
-// flattenMap converts nested maps into dot notation keys using koanf's Flatten
+// flattenMap converts nested maps into keys using the manager's delimiter
 func flattenMap(m map[string]any, prefix string) map[string]any {
 	flattened, _ := maps.Flatten(m, nil, ".")
 	if prefix == "" {
 		return flattened
 	}
 
-	// Add prefix to all keys
+	// Add prefix to all keys using the manager's delimiter
 	prefixed := make(map[string]any, len(flattened))
 	for k, v := range flattened {
-		prefixed[prefix+"."+k] = v
+		prefixed[prefix+"."+k] = v // Still use dot here since maps.Flatten uses dots internally
 	}
 	return prefixed
 }
 
-// Load loads the default configuration values into the Koanf instance.
-func (d *DefaultConfigSource) Load(ctx context.Context, k *koanf.Koanf) error {
+// Load loads the default configuration values into the config manager.
+func (d *DefaultConfigSource) Load(ctx context.Context, cm configManager) error {
 	// First load defaults from registered structs that implement ConfigDefaults
 	for key, typ := range d.manager.GetRegisteredStructs() {
 		if ireflect.ImplementsConfigDefaults(typ) {
@@ -71,9 +70,10 @@ func (d *DefaultConfigSource) Load(ctx context.Context, k *koanf.Koanf) error {
 			// Get defaults from the struct
 			if defaults, ok := instance.(ConfigDefaults); ok {
 				for defKey, defValue := range defaults.Defaults() {
-					fullKey := key + k.Delim() + defKey
-					if !k.Exists(fullKey) {
-						if err := k.Set(fullKey, defValue); err != nil {
+					fullKey := key + "." + defKey // Use dot since we're working with flattened map keys
+					// Only set if key doesn't exist
+					if exists, _, _ := cm.Get(fullKey); exists == nil {
+						if err := cm.Set(ctx, fullKey, defValue); err != nil {
 							return fmt.Errorf("failed to set default value for key %s: %w", fullKey, err)
 						}
 					}
@@ -84,9 +84,9 @@ func (d *DefaultConfigSource) Load(ctx context.Context, k *koanf.Koanf) error {
 
 	// Then load static defaults
 	for key, value := range d.defaults {
-		// Only set the value if it doesn't already exist
-		if !k.Exists(key) {
-			if err := k.Set(key, value); err != nil {
+		// Only set if key doesn't exist
+		if exists, _, _ := cm.Get(key); exists == nil {
+			if err := cm.Set(ctx, key, value); err != nil {
 				return fmt.Errorf("failed to set default value for key %s: %w", key, err)
 			}
 		}
@@ -95,7 +95,7 @@ func (d *DefaultConfigSource) Load(ctx context.Context, k *koanf.Koanf) error {
 }
 
 // Watch does not support watching default values, so it returns nil.
-func (d *DefaultConfigSource) Watch(ctx context.Context, k *koanf.Koanf, onChange WatchOnChangeCallback) error {
+func (d *DefaultConfigSource) Watch(ctx context.Context, cm configManager, onChange WatchOnChangeCallback) error {
 	// Default values cannot be watched, so return nil.
 	return nil
 }

@@ -78,6 +78,36 @@ func TestNewConfigManager(t *testing.T) {
 	assert.Equal(t, "test_value", decoded)
 }
 
+func TestWithDelimiter(t *testing.T) {
+	// Create manager with custom delimiter
+	cm, err := NewConfigManager([]source.ConfigSource{}, WithDelimiter("/"))
+	require.NoError(t, err)
+
+	// Verify delimiter is set correctly
+	assert.Equal(t, "/", cm.Delim())
+
+	// Test setting and getting with custom delimiter
+	err = cm.Set(context.Background(), "test/key", "value")
+	assert.NoError(t, err)
+
+	val, _, err := cm.Get("test/key")
+	assert.NoError(t, err)
+	assert.Equal(t, "value", val)
+
+	// Verify nested keys work with custom delimiter
+	err = cm.Set(context.Background(), "test/nested/key", "nested_value")
+	assert.NoError(t, err)
+
+	nestedVal, _, err := cm.Get("test/nested/key")
+	assert.NoError(t, err)
+	assert.Equal(t, "nested_value", nestedVal)
+
+	// Verify keys are properly split
+	keys := cm.Keys()
+	assert.Contains(t, keys, "test/key")
+	assert.Contains(t, keys, "test/nested/key")
+}
+
 func TestConfigManager_WildcardSubscriptions(t *testing.T) {
 	testCases := []struct {
 		name          string
@@ -246,8 +276,11 @@ func TestConfigManager_SetGetExists(t *testing.T) {
 func TestConfigManager_All(t *testing.T) {
 	cm := newTestManager()
 
-	cm.Set(context.Background(), "test.string", "test_value")
-	cm.Set(context.Background(), "test.int", 123)
+	err := cm.Set(context.Background(), "test.string", "test_value")
+	require.NoError(t, err)
+
+	err = cm.Set(context.Background(), "test.int", 123)
+	require.NoError(t, err)
 
 	all := cm.All()
 	assert.Equal(t, map[string]any{
@@ -313,7 +346,8 @@ func TestConfigManager_RegisterStructGet(t *testing.T) {
 		err := cm.RegisterStruct("test.struct", &TestConfig{})
 		assert.NoError(t, err)
 
-		cm.Set(context.Background(), "test.struct.string_value", "pointer_reg")
+		err = cm.Set(context.Background(), "test.struct.string_value", "pointer_reg")
+		require.NoError(t, err)
 
 		var targetCfg TestConfig
 		raw, decoded, err := cm.Get("test.struct", &targetCfg)
@@ -473,8 +507,11 @@ func TestConfigManager_SetAtomic(t *testing.T) {
 	cm := newTestManager()
 
 	// Set initial values
-	cm.Set(context.Background(), "test.string", "initial_string")
-	cm.Set(context.Background(), "test.int", 123)
+	err := cm.Set(context.Background(), "test.string", "initial_string")
+	require.NoError(t, err)
+
+	err = cm.Set(context.Background(), "test.int", 123)
+	require.NoError(t, err)
 
 	// Define updates
 	updates := map[string]any{
@@ -483,7 +520,7 @@ func TestConfigManager_SetAtomic(t *testing.T) {
 	}
 
 	// Perform atomic update
-	err := cm.SetAtomic(context.Background(), updates)
+	err = cm.SetAtomic(context.Background(), updates)
 	assert.NoError(t, err)
 
 	// Verify values
@@ -504,9 +541,14 @@ func TestConfigManager_WithLogger(t *testing.T) {
 func TestConfigManager_getFilteredKeys(t *testing.T) {
 	cm := newTestManager()
 
-	cm.Set(context.Background(), "test.string", "test_value")
-	cm.Set(context.Background(), "test.int", 123)
-	cm.Set(context.Background(), "other.value", true)
+	err := cm.Set(context.Background(), "test.string", "test_value")
+	require.NoError(t, err)
+
+	err = cm.Set(context.Background(), "test.int", 123)
+	require.NoError(t, err)
+
+	err = cm.Set(context.Background(), "other.value", true)
+	require.NoError(t, err)
 
 	// No prefix
 	keys := cm.getFilteredKeys()
@@ -644,6 +686,44 @@ func TestConfigManager_implementsInterface(t *testing.T) {
 
 	validatorType := reflect.TypeOf((*Validator)(nil)).Elem()
 	assert.False(t, cm.implementsInterface("test", validatorType))
+}
+
+func TestConfigManager_DeleteNotifiesWatchers(t *testing.T) {
+	cm := newTestManagerWithData(map[string]any{
+		"test.key": "test_value",
+	})
+
+	// Track if callback was called
+	var callbackCalled bool
+	var callbackKey string
+	var callbackOldValue any
+	var callbackNewValue any
+
+	// Get the old value before setting up subscription
+	oldValue, _, _ := cm.Get("test.key")
+
+	// Subscribe to changes
+	unsub := cm.Subscribe("test.key", func(key string) {
+		callbackCalled = true
+		callbackKey = key
+		callbackOldValue = oldValue
+		callbackNewValue, _, _ = cm.Get("test.key") // Get current value after change
+	})
+	defer unsub()
+
+	// Delete the key
+	cm.Delete("test.key")
+
+	// Verify callback was called with correct values
+	assert.True(t, callbackCalled)
+	assert.Equal(t, "test.key", callbackKey)
+	assert.Equal(t, "test_value", callbackOldValue)
+	assert.Nil(t, callbackNewValue)
+
+	// Verify key was actually deleted
+	val, _, err := cm.Get("test.key")
+	assert.Error(t, err)
+	assert.Nil(t, val)
 }
 
 type mockSyncManager struct {
@@ -798,8 +878,11 @@ func TestConfigManager_RegisterAndLoadSource(t *testing.T) {
 
 	// Test watching by updating the source
 	updateChan := make(chan struct{})
+	var once sync.Once
 	cm.Subscribe("runtime.key", func(_ string) {
-		close(updateChan)
+		once.Do(func() {
+			close(updateChan)
+		})
 	})
 
 	memSource.Set("runtime.key", "updated_value")
@@ -813,7 +896,7 @@ func TestConfigManager_RegisterAndLoadSource(t *testing.T) {
 	}
 
 	// Test loading invalid source
-	invalidSource := &invalidSource{}
+	invalidSource := &source.TestingInvalidSource{}
 	err = cm.LoadSource(invalidSource, true, false)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to load source")
@@ -821,11 +904,11 @@ func TestConfigManager_RegisterAndLoadSource(t *testing.T) {
 
 type invalidSource struct{}
 
-func (i *invalidSource) Load(ctx context.Context, k *koanf.Koanf) error {
+func (i *invalidSource) Load(ctx context.Context, cm Manager) error {
 	return fmt.Errorf("forced error")
 }
 
-func (i *invalidSource) Watch(ctx context.Context, k *koanf.Koanf, cb source.WatchOnChangeCallback) error {
+func (i *invalidSource) Watch(ctx context.Context, cm Manager, cb source.WatchOnChangeCallback) error {
 	return nil
 }
 

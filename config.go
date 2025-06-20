@@ -46,11 +46,13 @@ type Manager interface {
 	// Configuration modification
 	Set(ctx context.Context, key string, value any) error
 	SetAtomic(ctx context.Context, updates map[string]any) error
+	Delete(key string)
 
 	// Change notifications
 	Subscribe(pattern string, callback SubscriptionCallback) func()
 
 	// Key Management
+	Keys() []string
 	ListKeys(prefix string) []string
 
 	// File paths
@@ -73,4 +75,7 @@ type Manager interface {
 
 	// Sync management
 	SetupSync(opts ...ConfigOption) error
+
+	// Delimiter access
+	Delim() string
 }

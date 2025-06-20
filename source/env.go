@@ -25,11 +25,14 @@ func NewEnvConfigSource(prefix, delimiter string) *EnvConfigSource {
 	}
 }
 
-// Load loads the configuration from environment variables into the Koanf instance.
-func (e *EnvConfigSource) Load(ctx context.Context, k *koanf.Koanf) error {
-	if k == nil {
-		return fmt.Errorf("koanf instance cannot be nil")
+// Load loads the configuration from environment variables into the config manager.
+func (e *EnvConfigSource) Load(ctx context.Context, cm configManager) error {
+	if cm == nil {
+		return fmt.Errorf("config manager cannot be nil")
 	}
+
+	// Create temporary koanf to load env vars
+	tmpKoanf := koanf.New(cm.Delim())
 
 	// Create a callback that transforms env var names to config keys
 	cb := func(s string) string {
@@ -41,19 +44,30 @@ func (e *EnvConfigSource) Load(ctx context.Context, k *koanf.Koanf) error {
 		// Convert to lowercase and replace delimiter with koanf's delimiter
 		s = strings.ToLower(s)
 		if e.delimiter != "" {
-			s = strings.ReplaceAll(s, e.delimiter, k.Delim())
+			s = strings.ReplaceAll(s, e.delimiter, tmpKoanf.Delim())
 		}
 		return s
 	}
 
 	// Use the env provider with our callback
-	provider := env.Provider(e.prefix, k.Delim(), cb)
-	return k.Load(provider, nil)
+	provider := env.Provider(e.prefix, tmpKoanf.Delim(), cb)
+	if err := tmpKoanf.Load(provider, nil); err != nil {
+		return err
+	}
+
+	// Set values through config manager to trigger validation
+	for key, value := range tmpKoanf.All() {
+		if err := cm.Set(ctx, key, value); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // Watch watches for changes in the environment variables and triggers the onChange function when a change occurs.
 // Environment variables cannot be watched in a cross-platform way, so this is a no-op.
-func (e *EnvConfigSource) Watch(_ context.Context, _ *koanf.Koanf, _ WatchOnChangeCallback) error {
+func (e *EnvConfigSource) Watch(_ context.Context, _ configManager, _ WatchOnChangeCallback) error {
 	// Environment variables cannot be watched in a cross-platform way
 	return nil
 }

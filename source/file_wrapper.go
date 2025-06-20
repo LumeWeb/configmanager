@@ -50,7 +50,7 @@ func WithFileSourceLogger(logger *zap.Logger) FileSourceOption {
 	}
 }
 
-func (f *fileSourceWrapper) Load(ctx context.Context, k *koanf.Koanf) error {
+func (f *fileSourceWrapper) Load(ctx context.Context, cm configManager) error {
 	f.prevLock.Lock()
 	defer f.prevLock.Unlock()
 
@@ -59,16 +59,21 @@ func (f *fileSourceWrapper) Load(ctx context.Context, k *koanf.Koanf) error {
 		f.prevState = make(map[string]any)
 	}
 
-	// Clear existing values before loading new ones
-	k.Delete("")
-
-	// Load new configuration
-	if err := k.Load(f.provider, yaml.Parser()); err != nil {
+	// Create temporary koanf to load file
+	tmpKoanf := koanf.New(".")
+	if err := tmpKoanf.Load(f.provider, yaml.Parser()); err != nil {
 		return err
 	}
 
 	// Store the new state
-	newState := k.All()
+	newState := tmpKoanf.All()
+
+	// Set values through config manager to trigger validation
+	for key, value := range newState {
+		if err := cm.Set(ctx, key, value); err != nil {
+			return err
+		}
+	}
 
 	// Compare with previous state if this isn't the first load
 	if f.initialLoad {
@@ -90,7 +95,7 @@ func (f *fileSourceWrapper) Load(ctx context.Context, k *koanf.Koanf) error {
 	return nil
 }
 
-func (f *fileSourceWrapper) Watch(ctx context.Context, k *koanf.Koanf, cb WatchOnChangeCallback) error {
+func (f *fileSourceWrapper) Watch(ctx context.Context, cm configManager, cb WatchOnChangeCallback) error {
 	return f.provider.Watch(func(event any, err error) {
 		if err != nil {
 			// if err is not nil, it means the file was removed
@@ -118,15 +123,20 @@ func (f *fileSourceWrapper) Watch(ctx context.Context, k *koanf.Koanf, cb WatchO
 			return
 		}
 
+		// Update config manager with changed values
 		for _, key := range changedKeys {
-			if !tmpKoanf.Exists(key) {
-				k.Delete(key)
+			if tmpKoanf.Exists(key) {
+				if err := cm.Set(ctx, key, tmpKoanf.Get(key)); err != nil {
+					cb(nil, err)
+					return
+				}
+			} else {
+				// Handle deleted keys by setting nil
+				if err := cm.Set(ctx, key, nil); err != nil {
+					cb(nil, err)
+					return
+				}
 			}
-		}
-
-		if err := k.Load(f.provider, yaml.Parser()); err != nil {
-			cb(nil, err)
-			return
 		}
 
 		cb(changedKeys, nil)

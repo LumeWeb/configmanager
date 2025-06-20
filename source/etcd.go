@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/knadh/koanf/v2"
+	"github.com/knadh/koanf/maps"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	_ "go.etcd.io/etcd/client/v3/mock/mockserver"
 	config "go.lumeweb.com/configmanager/config"
@@ -42,12 +42,12 @@ type EtcdConfigSource struct {
 }
 
 // Persist writes configuration changes back to etcd.
-func (e *EtcdConfigSource) Persist(ctx context.Context, k *koanf.Koanf, keyPrefix ...string) error {
+func (e *EtcdConfigSource) Persist(ctx context.Context, cm configManager, keyPrefix ...string) error {
 	e.logger.Debug("Persisting configuration to etcd",
 		zap.Strings("keyPrefix", keyPrefix))
 
 	// If no keys specified, persist everything
-	keys := k.Keys()
+	keys := cm.Keys()
 	if len(keyPrefix) > 0 {
 		keys = keyPrefix
 		e.logger.Debug("Persisting prefixed keys",
@@ -58,10 +58,11 @@ func (e *EtcdConfigSource) Persist(ctx context.Context, k *koanf.Koanf, keyPrefi
 	}
 
 	for _, key := range keys {
-		value := k.Get(key)
-		if value == nil {
-			e.logger.Debug("Skipping nil value",
-				zap.String("key", key))
+		value, _, err := cm.Get(key)
+		if err != nil {
+			e.logger.Debug("Skipping non-existent key",
+				zap.String("key", key),
+				zap.Error(err))
 			continue
 		}
 
@@ -118,8 +119,8 @@ func NewEtcdConfigSource(config *config.EtcdConfig, opts ...EtcdConfigSourceOpti
 	return e, nil
 }
 
-// Load loads the configuration from etcd into the Koanf instance.
-func (e *EtcdConfigSource) Load(ctx context.Context, k *koanf.Koanf) error {
+// Load loads the configuration from etcd into the config manager.
+func (e *EtcdConfigSource) Load(ctx context.Context, cm configManager) error {
 	e.logger.Debug("Loading configuration from etcd",
 		zap.String("prefix", e.prefix))
 
@@ -134,19 +135,10 @@ func (e *EtcdConfigSource) Load(ctx context.Context, k *koanf.Koanf) error {
 	e.logger.Debug("Retrieved keys from etcd",
 		zap.Int("count", len(resp.Kvs)))
 
-	// Log all retrieved keys/values for debugging
-	for _, kv := range resp.Kvs {
-		e.logger.Debug("Retrieved etcd key-value",
-			zap.String("key", string(kv.Key)),
-			zap.ByteString("value", kv.Value),
-			zap.Int64("version", kv.Version))
-	}
-
-	configMap := make(map[string]any)
 	for _, kv := range resp.Kvs {
 		key := strings.TrimPrefix(string(kv.Key), e.prefix)
 		key = strings.TrimPrefix(key, "/")
-		key = strings.ReplaceAll(key, "/", k.Delim())
+		key = strings.ReplaceAll(key, "/", cm.Delim())
 
 		e.logger.Debug("Processing etcd key",
 			zap.String("raw_key", string(kv.Key)),
@@ -161,29 +153,38 @@ func (e *EtcdConfigSource) Load(ctx context.Context, k *koanf.Koanf) error {
 			continue
 		}
 
-		configMap[key] = value
-		e.logger.Debug("Added config value",
-			zap.String("key", key),
-			zap.Any("value", value))
+		// Flatten nested maps using koanf/maps
+		if nestedMap, ok := value.(map[string]interface{}); ok {
+			flattenedMap, _ := maps.Flatten(nestedMap, nil, cm.Delim())
+			for flatKey, flatValue := range flattenedMap {
+				fullKey := joinKeys(key, flatKey, cm.Delim())
+				if err := cm.Set(ctx, fullKey, flatValue); err != nil {
+					e.logger.Error("Failed to set config value",
+						zap.String("key", fullKey),
+						zap.Error(err))
+					return fmt.Errorf("failed to set config value for key %s: %w", fullKey, err)
+				}
+			}
+		} else {
+			e.logger.Debug("Setting config value",
+				zap.String("key", key),
+				zap.Any("value", value))
+
+			if err := cm.Set(ctx, key, value); err != nil {
+				e.logger.Error("Failed to set config value",
+					zap.String("key", key),
+					zap.Error(err))
+				return fmt.Errorf("failed to set config value for key %s: %w", key, err)
+			}
+		}
 	}
 
-	e.logger.Debug("Final config map before loading into koanf",
-		zap.Any("config_map", configMap))
-
-	err = k.Load(newEtcdMapProvider(configMap), nil)
-	if err != nil {
-		e.logger.Error("Failed to load config map into koanf",
-			zap.Error(err))
-		return err
-	}
-
-	e.logger.Debug("Successfully loaded config from etcd",
-		zap.Strings("keys", k.Keys()))
+	e.logger.Debug("Successfully loaded config from etcd")
 	return nil
 }
 
 // Watch watches for changes in etcd and triggers the onChange function when a change occurs.
-func (e *EtcdConfigSource) Watch(ctx context.Context, k *koanf.Koanf, onChange WatchOnChangeCallback) error {
+func (e *EtcdConfigSource) Watch(ctx context.Context, cm configManager, onChange WatchOnChangeCallback) error {
 	e.watchMu.Lock()
 	defer e.watchMu.Unlock()
 
@@ -218,7 +219,7 @@ func (e *EtcdConfigSource) Watch(ctx context.Context, k *koanf.Koanf, onChange W
 					zap.Strings("changed_keys", changedKeys))
 
 				// Reload the config when changes are detected
-				if err := e.Load(ctx, k); err != nil {
+				if err := e.Load(ctx, cm); err != nil {
 					e.logger.Error("Failed to reload config from etcd",
 						zap.Error(err))
 					continue
@@ -248,25 +249,19 @@ func (e *EtcdConfigSource) Stop() error {
 
 // fullKey combines the etcd prefix with the configuration key
 func (e *EtcdConfigSource) fullKey(key string) string {
-	if e.prefix == "" {
+	return joinKeys(e.prefix, key, "/")
+}
+
+// joinKeys safely joins two keys with a delimiter, handling empty parts
+func joinKeys(prefix, key, delim string) string {
+	if prefix == "" {
 		return key
 	}
-	return e.prefix + "/" + key
-}
-
-// etcdMapProvider implements koanf.Provider for a map[string]any specifically for etcd
-type etcdMapProvider struct {
-	data map[string]any
-}
-
-func newEtcdMapProvider(data map[string]any) *etcdMapProvider {
-	return &etcdMapProvider{data: data}
-}
-
-func (m *etcdMapProvider) Read() (map[string]any, error) {
-	return m.data, nil
-}
-
-func (m *etcdMapProvider) ReadBytes() ([]byte, error) {
-	return nil, fmt.Errorf("etcdMapProvider does not support reading bytes")
+	if key == "" {
+		return prefix
+	}
+	// Trim any existing delimiters from ends
+	prefix = strings.TrimSuffix(prefix, delim)
+	key = strings.TrimPrefix(key, delim)
+	return prefix + delim + key
 }

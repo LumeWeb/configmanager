@@ -2,10 +2,10 @@ package source
 
 import (
 	"context"
+	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 
-	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -19,47 +19,51 @@ func TestMemoryConfigSource(t *testing.T) {
 	src := NewMemoryConfigSource(initialData)
 
 	t.Run("Load initial data", func(t *testing.T) {
-		k := koanf.New(".")
-		err := src.Load(context.Background(), k)
+		mgr := newMockManager()
+		err := src.Load(context.Background(), mgr)
 		assert.NoError(t, err)
 
-		assert.Equal(t, "value", k.Get("test.key"))
-		assert.Equal(t, 42, k.Get("test.num"))
-		assert.Equal(t, true, k.Get("test.bool"))
+		mgr.assertValue(t, "test.key", "value")
+		mgr.assertValue(t, "test.num", 42)
+		mgr.assertValue(t, "test.bool", true)
 	})
 
 	t.Run("Set and Load new data", func(t *testing.T) {
 		src.Set("new.key", "new value")
-		k := koanf.New(".")
-		err := src.Load(context.Background(), k)
+		mgr := newMockManager()
+		err := src.Load(context.Background(), mgr)
 		assert.NoError(t, err)
 
-		assert.Equal(t, "new value", k.Get("new.key"))
+		val, _, err := mgr.Get("new.key")
+		require.NoError(t, err)
+		assert.Equal(t, "new value", val)
 	})
 
 	t.Run("Delete key", func(t *testing.T) {
 		src.Delete("test.key")
-		k := koanf.New(".")
-		err := src.Load(context.Background(), k)
+		mgr := newMockManager()
+		err := src.Load(context.Background(), mgr)
 		assert.NoError(t, err)
 
-		assert.Nil(t, k.Get("test.key"))
+		val, _, err := mgr.Get("test.key")
+		require.Error(t, err)
+		assert.Nil(t, val)
 	})
 
 	t.Run("Clear all data", func(t *testing.T) {
 		src.Clear()
-		k := koanf.New(".")
-		err := src.Load(context.Background(), k)
+		mgr := newMockManager()
+		err := src.Load(context.Background(), mgr)
 		assert.NoError(t, err)
 
-		assert.Empty(t, k.All())
+		assert.Empty(t, mgr.All())
 	})
 
 	t.Run("Watch notifications", func(t *testing.T) {
-		k := koanf.New(".")
+		mgr := newMockManager()
 		changeChan := make(chan []string, 5) // Buffer for multiple notifications
 
-		err := src.Watch(context.Background(), k, func(changedKeys []string, err error) {
+		err := src.Watch(context.Background(), mgr, func(changedKeys []string, err error) {
 			changeChan <- changedKeys
 		})
 		assert.NoError(t, err)
@@ -71,7 +75,9 @@ func TestMemoryConfigSource(t *testing.T) {
 		select {
 		case changedKeys := <-changeChan:
 			assert.Equal(t, []string{"watch.test"}, changedKeys)
-			assert.Equal(t, "value", k.Get("watch.test"))
+			val, _, err := mgr.Get("watch.test")
+			require.NoError(t, err)
+			assert.Equal(t, "value", val)
 		case <-time.After(100 * time.Millisecond):
 			t.Fatal("timeout waiting for first watch notification")
 		}
@@ -97,25 +103,27 @@ func TestMemoryConfigSource(t *testing.T) {
 		}
 
 		// Test delete notification
-		src.Delete("watch.test2")
-		
+		src.DeleteFromManager("watch.test2", mgr)
+
 		// Wait for fourth notification
 		select {
 		case changedKeys := <-changeChan:
 			assert.Equal(t, []string{"watch.test2"}, changedKeys)
-			assert.Equal(t, 42, k.Get("watch.test2"))
+			val, _, err := mgr.Get("watch.test2")
+			require.Error(t, err)
+			assert.Nil(t, val)
 		case <-time.After(100 * time.Millisecond):
 			t.Fatal("timeout waiting for delete watch notification")
 		}
 
 		// Test clear notification
 		src.Clear()
-		
+
 		// Wait for fifth notification
 		select {
 		case changedKeys := <-changeChan:
 			assert.ElementsMatch(t, []string{"watch.test", "watch.test3"}, changedKeys)
-			assert.Equal(t, map[string]any{}, k.All())
+			assert.Equal(t, map[string]any{}, mgr.All())
 		case <-time.After(100 * time.Millisecond):
 			t.Fatal("timeout waiting for clear watch notification")
 		}
@@ -125,7 +133,8 @@ func TestMemoryConfigSource(t *testing.T) {
 	})
 
 	t.Run("Persist does nothing", func(t *testing.T) {
-		err := src.Persist(context.Background(), koanf.New("."))
+		mgr := newMockManager()
+		err := src.Persist(context.Background(), mgr)
 		assert.NoError(t, err)
 	})
 }
