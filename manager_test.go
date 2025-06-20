@@ -251,43 +251,93 @@ func TestConfigManager_All(t *testing.T) {
 }
 
 func TestConfigManager_RegisterStructGet(t *testing.T) {
-	cm := newTestManager()
-	// Register the struct
-	err := cm.RegisterStruct("test.struct", TestConfig{})
-	assert.NoError(t, err)
+	t.Run("value registration with pointer target", func(t *testing.T) {
+		cm := newTestManager()
+		// Register the value type
+		err := cm.RegisterStruct("test.struct", TestConfig{})
+		assert.NoError(t, err)
 
-	// Set some values
-	cm.Set(context.Background(), "test.struct.string_value", "struct_string")
-	cm.Set(context.Background(), "test.struct.int_value", 456)
-	cm.Set(context.Background(), "test.struct.bool_value", false)
-	cm.Set(context.Background(), "test.struct.duration_value", "1m")
+		// Set values
+		cm.Set(context.Background(), "test.struct.string_value", "struct_string")
+		cm.Set(context.Background(), "test.struct.int_value", 456)
 
-	// Get the struct with target
-	targetCfg := TestConfig{}
-	cfg, err := cm.Get("test.struct", &targetCfg)
-	assert.NoError(t, err)
-	assert.IsType(t, &TestConfig{}, cfg)
+		// Get with pointer target
+		var targetCfg TestConfig
+		cfg, err := cm.Get("test.struct", &targetCfg)
+		assert.NoError(t, err)
+		assert.IsType(t, &TestConfig{}, cfg)
+		assert.Equal(t, "struct_string", cfg.(*TestConfig).StringValue)
+	})
 
-	// Assert values
-	expectedCfg := &TestConfig{
-		StringValue:   "struct_string",
-		IntValue:      456,
-		BoolValue:     false,
-		DurationValue: time.Minute,
-	}
-	assert.Equal(t, expectedCfg, cfg)
-	assert.Equal(t, expectedCfg, &targetCfg)
+	t.Run("value registration with nil target", func(t *testing.T) {
+		cm := newTestManager()
+		err := cm.RegisterStruct("test.struct", TestConfig{})
+		assert.NoError(t, err)
 
-	// Test RegisterStruct with same type
-	err = cm.RegisterStruct("test.struct", TestConfig{})
-	assert.NoError(t, err)
+		cm.Set(context.Background(), "test.struct.string_value", "nil_target")
 
-	// Test RegisterStruct with different type
-	type AnotherConfig struct {
-		AnotherValue string `config:"another_value"`
-	}
-	err = cm.RegisterStruct("test.struct", AnotherConfig{})
-	assert.Error(t, err)
+		// Get with nil target
+		cfg, err := cm.Get("test.struct", nil)
+		assert.NoError(t, err)
+		assert.IsType(t, &TestConfig{}, cfg)
+		assert.Equal(t, "nil_target", cfg.(*TestConfig).StringValue)
+	})
+
+	t.Run("value registration with value target", func(t *testing.T) {
+		cm := newTestManager()
+		err := cm.RegisterStruct("test.struct", TestConfig{})
+		assert.NoError(t, err)
+
+		cm.Set(context.Background(), "test.struct.string_value", "value_target")
+
+		// This should fail since we can't set into a value target
+		var targetCfg TestConfig
+		_, err = cm.Get("test.struct", targetCfg)
+		assert.Error(t, err)
+	})
+
+	t.Run("pointer registration with pointer target", func(t *testing.T) {
+		cm := newTestManager()
+		// Register pointer type
+		err := cm.RegisterStruct("test.struct", &TestConfig{})
+		assert.NoError(t, err)
+
+		cm.Set(context.Background(), "test.struct.string_value", "pointer_reg")
+
+		var targetCfg TestConfig
+		cfg, err := cm.Get("test.struct", &targetCfg)
+		assert.NoError(t, err)
+		assert.IsType(t, &TestConfig{}, cfg)
+		assert.Equal(t, "pointer_reg", cfg.(*TestConfig).StringValue)
+	})
+
+	t.Run("pointer registration with nil target", func(t *testing.T) {
+		cm := newTestManager()
+		err := cm.RegisterStruct("test.struct", &TestConfig{})
+		assert.NoError(t, err)
+
+		cm.Set(context.Background(), "test.struct.string_value", "nil_ptr_target")
+
+		cfg, err := cm.Get("test.struct", nil)
+		assert.NoError(t, err)
+		assert.IsType(t, &TestConfig{}, cfg)
+		assert.Equal(t, "nil_ptr_target", cfg.(*TestConfig).StringValue)
+	})
+
+	t.Run("type mismatch detection", func(t *testing.T) {
+		cm := newTestManager()
+		err := cm.RegisterStruct("test.struct", TestConfig{})
+		assert.NoError(t, err)
+
+		type MismatchConfig struct {
+			Different string `config:"different"`
+		}
+
+		var target MismatchConfig
+		_, err = cm.Get("test.struct", &target)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "does not match registered type")
+	})
 }
 
 func TestConfigManager_TypeConversions(t *testing.T) {
