@@ -10,6 +10,19 @@ import (
 	"testing"
 )
 
+// setupDefaultConfigTest creates a mock manager and DefaultConfigSource for testing
+func setupDefaultConfigTest(t *testing.T, defaults map[string]any, tagName string) (*mockManager, *DefaultConfigSource) {
+	mgr := newMockManager()
+	var opts []DefaultConfigOption
+	if defaults != nil {
+		opts = append(opts, WithDefaults(defaults))
+	}
+	if tagName != "" {
+		opts = append(opts, WithTagName(tagName))
+	}
+	return mgr, NewDefaultConfigSource(mgr, opts...)
+}
+
 // isNumeric checks if a value is a numeric type
 func isNumeric(v any) bool {
 	switch v.(type) {
@@ -126,17 +139,17 @@ func (m *mockManager) BulkSetAtomic(ctx context.Context, updates map[string]any)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	// Record that BulkSetAtomic was called
 	m.setCalls = append(m.setCalls, "BulkSetAtomic")
-	
+
 	// First validate all updates
 	for key, value := range updates {
 		if value == nil {
 			return fmt.Errorf("nil value for key %s", key)
 		}
 	}
-	
+
 	// Then apply all updates
 	for key, value := range updates {
 		m.setCalls = append(m.setCalls, key)
@@ -243,13 +256,13 @@ func TestNewDefaultConfigSource(t *testing.T) {
 	mgr := newMockManager()
 
 	t.Run("nil defaults", func(t *testing.T) {
-		dcs := NewDefaultConfigSource(mgr, nil)
+		dcs := NewDefaultConfigSource(mgr)
 		assert.NotNil(t, dcs)
 		assert.Empty(t, dcs.defaults)
 	})
 
 	t.Run("empty defaults", func(t *testing.T) {
-		dcs := NewDefaultConfigSource(mgr, map[string]any{})
+		dcs := NewDefaultConfigSource(mgr, WithDefaults(map[string]any{}))
 		assert.NotNil(t, dcs)
 		assert.Empty(t, dcs.defaults)
 	})
@@ -259,7 +272,7 @@ func TestNewDefaultConfigSource(t *testing.T) {
 			"key1": "value1",
 			"key2": 123,
 		}
-		dcs := NewDefaultConfigSource(mgr, defaults)
+		dcs := NewDefaultConfigSource(mgr, WithDefaults(defaults), WithTagName("config"))
 		assert.NotNil(t, dcs)
 		assert.Equal(t, defaults, dcs.defaults)
 	})
@@ -277,7 +290,7 @@ func TestNewDefaultConfigSource(t *testing.T) {
 			"parent.child2": true,
 			"key1":          123,
 		}
-		dcs := NewDefaultConfigSource(mgr, defaults)
+		dcs := NewDefaultConfigSource(mgr, WithDefaults(defaults))
 		assert.NotNil(t, dcs)
 		assert.Equal(t, expectedFlatDefaults, dcs.defaults)
 	})
@@ -287,12 +300,11 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("load static defaults", func(t *testing.T) {
-		mgr := newMockManager()
 		defaults := map[string]any{
 			"app.name": "TestApp",
 			"app.port": 8000,
 		}
-		dcs := NewDefaultConfigSource(mgr, defaults)
+		mgr, dcs := setupDefaultConfigTest(t, defaults, "")
 
 		err := dcs.Load(ctx, mgr)
 		assert.NoError(t, err)
@@ -302,11 +314,9 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 	})
 
 	t.Run("load struct defaults", func(t *testing.T) {
-		mgr := newMockManager()
+		mgr, dcs := setupDefaultConfigTest(t, nil, "config")
 		err := mgr.RegisterStruct("db", testConfigWithDefaults{})
 		assert.NoError(t, err)
-
-		dcs := NewDefaultConfigSource(mgr, nil)
 
 		err = dcs.Load(ctx, mgr)
 		assert.NoError(t, err)
@@ -316,11 +326,9 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 	})
 
 	t.Run("load struct without defaults", func(t *testing.T) {
-		mgr := newMockManager()
+		mgr, dcs := setupDefaultConfigTest(t, nil, "")
 		err := mgr.RegisterStruct("user", testConfigWithoutDefaults{})
 		assert.NoError(t, err)
-
-		dcs := NewDefaultConfigSource(mgr, nil)
 
 		err = dcs.Load(ctx, mgr)
 		assert.NoError(t, err)
@@ -330,11 +338,9 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 	})
 
 	t.Run("load struct with empty defaults", func(t *testing.T) {
-		mgr := newMockManager()
+		mgr, dcs := setupDefaultConfigTest(t, nil, "")
 		err := mgr.RegisterStruct("emptycfg", testConfigWithEmptyDefaults{})
 		assert.NoError(t, err)
-
-		dcs := NewDefaultConfigSource(mgr, nil)
 
 		err = dcs.Load(ctx, mgr)
 		assert.NoError(t, err)
@@ -344,14 +350,9 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 	})
 
 	t.Run("static defaults do not overwrite existing values", func(t *testing.T) {
-		mgr := newMockManager()
+		mgr, dcs := setupDefaultConfigTest(t, map[string]any{"app.name": "DefaultAppName"}, "")
 		err := mgr.Set(context.Background(), "app.name", "ExistingApp")
 		assert.NoError(t, err)
-
-		defaults := map[string]any{
-			"app.name": "DefaultAppName",
-		}
-		dcs := NewDefaultConfigSource(mgr, defaults)
 
 		err = dcs.Load(ctx, mgr)
 		assert.NoError(t, err)
@@ -360,14 +361,11 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 	})
 
 	t.Run("struct defaults do not overwrite existing values", func(t *testing.T) {
-		mgr := newMockManager()
+		mgr, dcs := setupDefaultConfigTest(t, nil, "")
 		err := mgr.RegisterStruct("db", testConfigWithDefaults{})
 		assert.NoError(t, err)
-
 		err = mgr.Set(context.Background(), "db.host", "existing_db_host")
 		assert.NoError(t, err)
-
-		dcs := NewDefaultConfigSource(mgr, nil)
 
 		err = dcs.Load(ctx, mgr)
 		assert.NoError(t, err)
@@ -377,14 +375,9 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 	})
 
 	t.Run("load both static and struct defaults", func(t *testing.T) {
-		mgr := newMockManager()
+		mgr, dcs := setupDefaultConfigTest(t, map[string]any{"app.name": "TestApp"}, "")
 		err := mgr.RegisterStruct("db", testConfigWithDefaults{})
 		assert.NoError(t, err)
-
-		staticDefaults := map[string]any{
-			"app.name": "TestApp",
-		}
-		dcs := NewDefaultConfigSource(mgr, staticDefaults)
 
 		err = dcs.Load(ctx, mgr)
 		assert.NoError(t, err)
@@ -397,14 +390,9 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 	})
 
 	t.Run("order of loading: struct defaults first, then static defaults", func(t *testing.T) {
-		mgr := newMockManager()
+		mgr, dcs := setupDefaultConfigTest(t, map[string]any{"conflict.host": "static_host_override"}, "")
 		err := mgr.RegisterStruct("conflict", testConfigWithDefaults{}) // Defaults host to "default_host"
 		assert.NoError(t, err)
-
-		staticDefaults := map[string]any{
-			"conflict.host": "static_host_override", // Static default for the same key
-		}
-		dcs := NewDefaultConfigSource(mgr, staticDefaults)
 
 		err = dcs.Load(ctx, mgr)
 		assert.NoError(t, err)
@@ -416,14 +404,9 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 	})
 
 	t.Run("static defaults for a key not in struct defaults", func(t *testing.T) {
-		mgr := newMockManager()
+		mgr, dcs := setupDefaultConfigTest(t, map[string]any{"db.user": "static_user"}, "")
 		err := mgr.RegisterStruct("db", testConfigWithDefaults{}) // Defaults host and port
 		assert.NoError(t, err)
-
-		staticDefaults := map[string]any{
-			"db.user": "static_user", // Static default for a key not in struct defaults
-		}
-		dcs := NewDefaultConfigSource(mgr, staticDefaults)
 
 		err = dcs.Load(ctx, mgr)
 		assert.NoError(t, err)
@@ -435,9 +418,50 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 
 }
 
+var _ ConfigDefaults = (*testConfig)(nil)
+
+// testConfig implements ConfigDefaults
+type testConfig struct {
+	FieldOne   string `config:"field_one"`
+	FieldTwo   string // No tag
+	fieldThree string `config:"field_three"` // Unexported
+}
+
+func (t *testConfig) Defaults() map[string]any {
+	return map[string]any{
+		"field_one":   "value_one",   // Exact tag match
+		"FieldTwo":    "value_two",   // Exact field name match (no tag)
+		"fieldThree":  "value_three", // Should be skipped (unexported)
+		"field_four":  "value_four",  // Should be skipped (no match)
+		"FieldTwoAlt": "value_alt",   // Should be skipped (no match)
+	}
+}
+
+func TestDefaultConfigSource_Load_StructFieldMatching(t *testing.T) {
+	ctx := context.Background()
+
+	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
+	err := dcs.manager.RegisterStruct("test", &testConfig{})
+	assert.NoError(t, err)
+	
+	err = dcs.Load(ctx, mgr)
+	assert.NoError(t, err)
+
+	// Check expected values were set
+	mgr.assertValue(t, "test.field_one", "value_one")
+	mgr.assertValue(t, "test.FieldTwo", "value_two")
+
+	// Check unexpected values were NOT set
+	_, _, err = mgr.Get("test.field_three")
+	assert.Error(t, err)
+	_, _, err = mgr.Get("test.field_four")
+	assert.Error(t, err)
+	_, _, err = mgr.Get("test.FieldTwoAlt")
+	assert.Error(t, err)
+}
+
 func TestDefaultConfigSource_Watch(t *testing.T) {
-	mgr := newMockManager()
-	dcs := NewDefaultConfigSource(mgr, nil)
+	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
 	ctx := context.Background()
 
 	err := dcs.Watch(ctx, mgr, func(changedKeys []string, err error) {
