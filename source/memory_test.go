@@ -26,6 +26,9 @@ func TestMemoryConfigSource(t *testing.T) {
 		mgr.assertValue(t, "test.key", "value")
 		mgr.assertValue(t, "test.num", 42)
 		mgr.assertValue(t, "test.bool", true)
+		
+		// Verify BulkSetAtomic was called
+		assert.Greater(t, len(mgr.setCalls), 0, "expected BulkSetAtomic to be called")
 	})
 
 	t.Run("Set and Load new data", func(t *testing.T) {

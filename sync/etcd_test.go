@@ -234,6 +234,41 @@ func (m *mockConfigManager) Set(ctx context.Context, key string, value any) erro
 	return nil
 }
 
+func (m *mockConfigManager) BulkSet(ctx context.Context, updates map[string]any) error {
+	if m.data == nil {
+		m.data = make(map[string]any)
+	}
+	for k, v := range updates {
+		m.data[k] = v
+	}
+	return nil
+}
+
+func (m *mockConfigManager) SetAtomic(ctx context.Context, updates map[string]any) error {
+	if m.data == nil {
+		m.data = make(map[string]any)
+	}
+	for k, v := range updates {
+		m.data[k] = v
+	}
+	return nil
+}
+
+func (m *mockConfigManager) BulkSetAtomic(ctx context.Context, updates map[string]any) error {
+	if m.data == nil {
+		m.data = make(map[string]any)
+	}
+	for k, v := range updates {
+		m.data[k] = v
+	}
+	return nil
+}
+
+func (m *mockConfigManager) Exists(key string) bool {
+	_, ok := m.data[key]
+	return ok
+}
+
 func TestEtcdSyncClient_fullKey(t *testing.T) {
 	tests := []struct {
 		name     string

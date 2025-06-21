@@ -68,11 +68,9 @@ func (f *fileSourceWrapper) Load(ctx context.Context, cm configManager) error {
 	// Store the new state
 	newState := tmpKoanf.All()
 
-	// Set values through config manager to trigger validation
-	for key, value := range newState {
-		if err := cm.Set(ctx, key, value); err != nil {
-			return err
-		}
+	// Use BulkSetAtomic for atomic loading of all values
+	if err := cm.BulkSetAtomic(ctx, newState); err != nil {
+		return err
 	}
 
 	// Compare with previous state if this isn't the first load

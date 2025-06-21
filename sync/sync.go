@@ -33,6 +33,9 @@ type Manager interface {
 type configManager interface {
 	Get(string, ...any) (any, any, error)
 	Set(ctx context.Context, key string, value any) error
+	BulkSet(ctx context.Context, updates map[string]any) error
+	SetAtomic(ctx context.Context, updates map[string]any) error
+	BulkSetAtomic(ctx context.Context, updates map[string]any) error
 	Delete(key string)
 	Keys() []string
 	Delim() string

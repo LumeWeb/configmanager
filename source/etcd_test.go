@@ -90,6 +90,9 @@ func TestEtcdConfigSource(t *testing.T) {
 		mgr.assertValue(t, "key1", "value1")
 		mgr.assertValue(t, "key2", 42)
 		mgr.assertValue(t, "nested.subkey", "subvalue")
+		
+		// Verify BulkSetAtomic was called
+		assert.Greater(t, len(mgr.setCalls), 0, "expected BulkSetAtomic to be called")
 	})
 
 	t.Run("Watch", func(t *testing.T) {

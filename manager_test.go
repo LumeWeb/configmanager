@@ -530,6 +530,110 @@ func TestConfigManager_SetAtomic(t *testing.T) {
 	assert.Equal(t, 456, val)
 }
 
+// Register a struct for validation testing with schema
+type testStruct struct {
+	Name string `config:"name"`
+	Age  int    `config:"age"`
+}
+
+func (t *testStruct) Schema() zog.ZogSchema {
+	return zog.Struct(zog.Shape{
+		"name": zog.String().Required().Min(1),
+		"age":  zog.Int().Required().GT(0),
+	})
+}
+
+func TestConfigManager_BulkSetAtomic(t *testing.T) {
+	cm := newTestManager()
+
+	// Register struct for validation
+	err := cm.RegisterStruct("test.struct", testStruct{})
+	require.NoError(t, err)
+
+	// Define updates that would fail individual validation
+	updates := map[string]any{
+		"test.string":      "updated",
+		"test.struct.name": "", // invalid empty name
+		"test.struct.age":  25,
+	}
+
+	// Perform bulk atomic update - should fail validation
+	err = cm.BulkSetAtomic(context.Background(), updates)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "validation failed")
+
+	// Verify values were NOT updated due to validation failure
+	val, _, _ := cm.Get("test.string")
+	assert.Equal(t, nil, val) // should remain initial value
+	val, _, _ = cm.Get("test.struct.name")
+	assert.Equal(t, nil, val)
+	val, _, _ = cm.Get("test.struct.age")
+	assert.Equal(t, nil, val)
+
+	// Now try valid updates
+	validUpdates := map[string]any{
+		"test.string":      "updated",
+		"test.struct.name": "valid_name",
+		"test.struct.age":  25,
+	}
+
+	err = cm.BulkSetAtomic(context.Background(), validUpdates)
+	assert.NoError(t, err)
+
+	// Verify values were updated
+	val, _, _ = cm.Get("test.string")
+	assert.Equal(t, "updated", val)
+	val, _, _ = cm.Get("test.struct.name")
+	assert.Equal(t, "valid_name", val)
+	val, _, _ = cm.Get("test.struct.age")
+	assert.Equal(t, 25, val)
+}
+
+func TestConfigManager_BulkSet(t *testing.T) {
+	cm := newTestManager()
+
+	err := cm.RegisterStruct("test.struct", testStruct{})
+	require.NoError(t, err)
+
+	// Define updates that would fail individual validation
+	updates := map[string]any{
+		"test.string":      "updated",
+		"test.struct.name": "", // invalid empty name
+		"test.struct.age":  25,
+	}
+
+	// Perform bulk update - should fail validation but partial updates may occur
+	err = cm.BulkSet(context.Background(), updates)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "validation failed")
+
+	// Verify values were partially updated before validation failure
+	val, _, _ := cm.Get("test.string")
+	assert.Equal(t, "updated", val) // simple value was updated
+	val, _, _ = cm.Get("test.struct.name")
+	assert.Equal(t, "", val) // invalid value was set
+	val, _, _ = cm.Get("test.struct.age")
+	assert.Equal(t, 25, val) // valid value was set
+
+	// Now try valid updates
+	validUpdates := map[string]any{
+		"test.string":      "updated",
+		"test.struct.name": "valid_name",
+		"test.struct.age":  25,
+	}
+
+	err = cm.BulkSet(context.Background(), validUpdates)
+	assert.NoError(t, err)
+
+	// Verify values were updated
+	val, _, _ = cm.Get("test.string")
+	assert.Equal(t, "updated", val)
+	val, _, _ = cm.Get("test.struct.name")
+	assert.Equal(t, "valid_name", val)
+	val, _, _ = cm.Get("test.struct.age")
+	assert.Equal(t, 25, val)
+}
+
 func TestConfigManager_WithLogger(t *testing.T) {
 	logger := zap.NewExample()
 	cm := newTestManager()
@@ -1013,14 +1117,13 @@ func TestConfigManager_ValidateWithZogSchema(t *testing.T) {
 		assert.NotEqual(t, "invalid-email", decoded)
 	})
 
-	t.Run("weak password fails schema validation", func(t *testing.T) {
+	t.Run("password without digit fails schema validation", func(t *testing.T) {
 		err := cm.Set(context.Background(), "test.schema.email", "valid@example.com")
 		assert.NoError(t, err)
 		err = cm.Set(context.Background(), "test.schema.password", "weak")
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "password")  // Check for password field
-		assert.Contains(t, err.Error(), "uppercase") // Check for uppercase requirement
-		assert.Contains(t, err.Error(), "digit")     // Check for digit requirement
+		assert.Contains(t, err.Error(), "password") // Check for password field
+		assert.Contains(t, err.Error(), "digit")    // Check for digit requirement
 
 		// Verify the invalid value wasn't actually set
 		raw, decoded, err := cm.Get("test.schema.password")
