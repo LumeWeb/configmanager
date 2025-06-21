@@ -25,6 +25,8 @@ func TestFileSourceWrapper_Load(t *testing.T) {
 		err := f.Load(context.Background(), mgr)
 		require.NoError(t, err)
 		mgr.assertValue(t, "test.key", "test_value")
+		// Verify BulkSetAtomic was called
+		assert.Contains(t, mgr.setCalls, "BulkSetAtomic", "expected BulkSetAtomic to be called")
 	})
 
 	t.Run("load empty file", func(t *testing.T) {
@@ -41,6 +43,8 @@ func TestFileSourceWrapper_Load(t *testing.T) {
 		err := f.Load(context.Background(), mgr)
 		require.NoError(t, err)
 		assert.Empty(t, mgr.Keys())
+		// Verify BulkSetAtomic was called even for empty file
+		assert.Contains(t, mgr.setCalls, "BulkSetAtomic", "expected BulkSetAtomic to be called")
 	})
 
 	t.Run("load non-existent file", func(t *testing.T) {

@@ -107,6 +107,66 @@ func (m *mockManager) Delete(key string) {
 	delete(m.data, key)
 }
 
+func (m *mockManager) BulkSet(ctx context.Context, updates map[string]any) error {
+	if ctx == nil {
+		return fmt.Errorf("context cannot be nil")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key, value := range updates {
+		m.setCalls = append(m.setCalls, key)
+		m.data[key] = value
+	}
+	return nil
+}
+
+func (m *mockManager) BulkSetAtomic(ctx context.Context, updates map[string]any) error {
+	if ctx == nil {
+		return fmt.Errorf("context cannot be nil")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	// Record that BulkSetAtomic was called
+	m.setCalls = append(m.setCalls, "BulkSetAtomic")
+	
+	// First validate all updates
+	for key, value := range updates {
+		if value == nil {
+			return fmt.Errorf("nil value for key %s", key)
+		}
+	}
+	
+	// Then apply all updates
+	for key, value := range updates {
+		m.setCalls = append(m.setCalls, key)
+		m.data[key] = value
+	}
+	return nil
+}
+
+func (m *mockManager) SetAtomic(ctx context.Context, updates map[string]any) error {
+	if ctx == nil {
+		return fmt.Errorf("context cannot be nil")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// First validate all updates
+	for key, value := range updates {
+		if value == nil {
+			return fmt.Errorf("nil value for key %s", key)
+		}
+	}
+
+	// Then apply all updates
+	for key, value := range updates {
+		m.setCalls = append(m.setCalls, key)
+		m.data[key] = value
+	}
+	return nil
+}
+
 func (m *mockManager) Keys() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

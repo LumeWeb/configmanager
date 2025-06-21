@@ -135,6 +135,9 @@ func (e *EtcdConfigSource) Load(ctx context.Context, cm configManager) error {
 	e.logger.Debug("Retrieved keys from etcd",
 		zap.Int("count", len(resp.Kvs)))
 
+	// Collect all updates in a single map for atomic setting
+	updates := make(map[string]any)
+
 	for _, kv := range resp.Kvs {
 		key := strings.TrimPrefix(string(kv.Key), e.prefix)
 		key = strings.TrimPrefix(key, "/")
@@ -158,24 +161,23 @@ func (e *EtcdConfigSource) Load(ctx context.Context, cm configManager) error {
 			flattenedMap, _ := maps.Flatten(nestedMap, nil, cm.Delim())
 			for flatKey, flatValue := range flattenedMap {
 				fullKey := joinKeys(key, flatKey, cm.Delim())
-				if err := cm.Set(ctx, fullKey, flatValue); err != nil {
-					e.logger.Error("Failed to set config value",
-						zap.String("key", fullKey),
-						zap.Error(err))
-					return fmt.Errorf("failed to set config value for key %s: %w", fullKey, err)
-				}
+				updates[fullKey] = flatValue
 			}
 		} else {
-			e.logger.Debug("Setting config value",
+			e.logger.Debug("Adding config value to updates",
 				zap.String("key", key),
 				zap.Any("value", value))
+			updates[key] = value
+		}
+	}
 
-			if err := cm.Set(ctx, key, value); err != nil {
-				e.logger.Error("Failed to set config value",
-					zap.String("key", key),
-					zap.Error(err))
-				return fmt.Errorf("failed to set config value for key %s: %w", key, err)
-			}
+	// Apply all updates atomically in a single operation
+	if len(updates) > 0 {
+		if err := cm.BulkSetAtomic(ctx, updates); err != nil {
+			e.logger.Error("Failed to bulk set config values",
+				zap.Any("updates", updates),
+				zap.Error(err))
+			return fmt.Errorf("failed to bulk set config values: %w", err)
 		}
 	}
 

@@ -36,11 +36,9 @@ func (f *FileConfigSource) Load(ctx context.Context, cm configManager) error {
 		return err
 	}
 
-	// Set values through config manager to trigger validation
-	for key, value := range tmpKoanf.All() {
-		if err := cm.Set(ctx, key, value); err != nil {
-			return err
-		}
+	// Use BulkSetAtomic for atomic loading of all values
+	if err := cm.BulkSetAtomic(ctx, tmpKoanf.All()); err != nil {
+		return fmt.Errorf("failed to bulk set config values: %w", err)
 	}
 	return nil
 }

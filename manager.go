@@ -517,11 +517,23 @@ func (cm *ConfigManagerDefault) Exists(key string) bool {
 
 // SetAtomic sets multiple configuration values atomically.
 func (cm *ConfigManagerDefault) SetAtomic(ctx context.Context, updates map[string]any) error {
+	return cm.bulkSetAtomicInternal(ctx, updates, true)
+}
+
+// BulkSetAtomic sets multiple configuration values atomically. All updates are applied first,
+// then validation is performed on all affected structs. If validation fails, all changes
+// are rolled back. This is different from SetAtomic which validates each change individually.
+// 
+// The method ensures either all updates succeed or none are applied (atomicity).
+// Returns an error if validation fails or if any update fails to apply.
+func (cm *ConfigManagerDefault) BulkSetAtomic(ctx context.Context, updates map[string]any) error {
+	return cm.bulkSetAtomicInternal(ctx, updates, true)
+}
+
+// bulkSetAtomicInternal is the internal implementation for atomic bulk updates
+func (cm *ConfigManagerDefault) bulkSetAtomicInternal(ctx context.Context, updates map[string]any, validate bool) error {
 	// Track old values and affected structs
 	oldValues := make(map[string]any)
-	structKeys := make(map[string]struct{})
-
-	// First pass: collect old values and identify affected structs
 	for key := range updates {
 		raw, _, err := cm.Get(key)
 		if err != nil {
@@ -529,48 +541,32 @@ func (cm *ConfigManagerDefault) SetAtomic(ctx context.Context, updates map[strin
 		} else {
 			oldValues[key] = raw
 		}
-		structKey := cm.findNearestStructKey(key)
-		if structKey != "" {
-			structKeys[structKey] = struct{}{}
-		}
 	}
 
-	// Second pass: apply all updates
+	// Apply all updates first without validation
 	for key, value := range updates {
-		if err := cm.Set(ctx, key, value); err != nil {
+		if err := cm.setInternal(ctx, key, value, false); err != nil {
 			return fmt.Errorf("failed to set config value for key %s: %w", key, err)
 		}
 	}
 
-	// Third pass: validate and notify for affected structs
-	for structKey := range structKeys {
-		newStruct, err := cm.getIntoStruct(structKey, nil)
-		if err != nil {
-			return fmt.Errorf("failed to decode struct for key %s: %w", structKey, err)
-		}
-
-		if err := cm.validateValue(structKey, newStruct); err != nil {
+	// Validate affected structs if needed
+	if validate {
+		if err := cm.validateStructUpdates(updates); err != nil {
 			// Revert all changes if validation fails
 			for key, oldValue := range oldValues {
-				_ = cm.Set(ctx, key, oldValue)
+				_ = cm.setInternal(ctx, key, oldValue, false)
 			}
-			return fmt.Errorf("validation failed for struct %s: %w", structKey, err)
+			return err
 		}
-
-		oldValue, _, err := cm.Get(structKey)
-		if err != nil {
-			cm.logger.Error("failed to get old value for struct during atomic update",
-				zap.String("key", structKey),
-				zap.Error(err))
-			continue
-		}
-		cm.notifySubscribers(structKey, oldValue, newStruct)
 	}
 
-	// Notify simple key/value updates that weren't part of a struct
+	// Notify changes
+	cm.notifyUpdates(updates, oldValues)
+
+	// Sync changes if needed
 	for key, value := range updates {
-		if _, exists := structKeys[cm.findNearestStructKey(key)]; !exists && cm.shouldSyncKey(key) {
-			// Push to sync manager and fire event on success
+		if cm.shouldSyncKey(key) {
 			err := cm.syncMgr.Push(ctx, key, value, func(sKey string, sValue any) {
 				cm.notifySubscribers(sKey, oldValues[sKey], sValue)
 			})
@@ -578,10 +574,7 @@ func (cm *ConfigManagerDefault) SetAtomic(ctx context.Context, updates map[strin
 				cm.logger.Error("failed to push config to sync manager after atomic set",
 					zap.String("key", key),
 					zap.Error(err))
-				// Continue with other keys even if one fails
 			}
-		} else if !exists {
-			cm.notifySubscribers(key, oldValues[key], value)
 		}
 	}
 
@@ -590,6 +583,44 @@ func (cm *ConfigManagerDefault) SetAtomic(ctx context.Context, updates map[strin
 
 // Set sets the configuration value for the given key.
 func (cm *ConfigManagerDefault) Set(ctx context.Context, key string, value any) error {
+	return cm.setInternal(ctx, key, value, true)
+}
+
+// BulkSet sets multiple configuration values without individual validation.
+// Validation will be done once after all values are set.
+func (cm *ConfigManagerDefault) BulkSet(ctx context.Context, updates map[string]any) error {
+	// Track old values
+	oldValues := make(map[string]any)
+	for key := range updates {
+		if val, _, err := cm.Get(key); err == nil {
+			oldValues[key] = val
+		}
+	}
+
+	// Apply all updates first
+	for key, value := range updates {
+		if err := cm.setInternal(ctx, key, value, false); err != nil {
+			return err
+		}
+	}
+
+	// Validate affected structs
+	if err := cm.validateStructUpdates(updates); err != nil {
+		// Revert all changes if validation fails
+		for key, oldValue := range oldValues {
+			_ = cm.koanf.Set(key, oldValue)
+		}
+		return err
+	}
+
+	// Notify changes
+	cm.notifyUpdates(updates, oldValues)
+
+	return nil
+}
+
+// setInternal is the internal implementation of setting a value with optional validation
+func (cm *ConfigManagerDefault) setInternal(ctx context.Context, key string, value any, validate bool) error {
 	// Get the old value before updating
 	oldValue, _, _ := cm.Get(key)
 
@@ -608,7 +639,7 @@ func (cm *ConfigManagerDefault) Set(ctx context.Context, key string, value any) 
 			if structKey == "" {
 				// No struct association - simple key/value update
 				cm.notifySubscribers(sKey, oldValue, sValue)
-			} else {
+			} else if validate {
 				// Update and validate the associated struct
 				newStruct, err := cm.getIntoStruct(structKey, nil)
 				if err != nil {
@@ -640,7 +671,7 @@ func (cm *ConfigManagerDefault) Set(ctx context.Context, key string, value any) 
 				zap.Error(err))
 			return fmt.Errorf("failed to push config to sync manager: %w", err)
 		}
-	} else {
+	} else if validate {
 		if structKey == "" {
 			// No struct association - simple key/value update
 			cm.notifySubscribers(key, oldValue, value)
@@ -1119,4 +1150,44 @@ func (cm *ConfigManagerDefault) LoadNamespace(namespace string) error {
 	}
 
 	return nil
+}
+
+// validateStructUpdates validates all structs affected by the updates
+func (cm *ConfigManagerDefault) validateStructUpdates(updates map[string]any) error {
+	structKeys := make(map[string]struct{}, len(updates)) // Pre-allocate with expected size
+	for key := range updates {
+		if structKey := cm.findNearestStructKey(key); structKey != "" {
+			structKeys[structKey] = struct{}{}
+		}
+	}
+
+	for structKey := range structKeys {
+		newStruct, err := cm.getIntoStruct(structKey, nil)
+		if err != nil {
+			return fmt.Errorf("failed to decode struct for key %s: %w", structKey, err)
+		}
+		if err := cm.validateValue(structKey, newStruct); err != nil {
+			return fmt.Errorf("validation failed for struct %s: %w", structKey, err)
+		}
+	}
+	return nil
+}
+
+// notifyUpdates handles change notifications for updated keys
+func (cm *ConfigManagerDefault) notifyUpdates(updates map[string]any, oldValues map[string]any) {
+	structKeys := make(map[string]struct{}, len(updates)) // Pre-allocate with expected size
+	for key := range updates {
+		if structKey := cm.findNearestStructKey(key); structKey != "" {
+			structKeys[structKey] = struct{}{}
+		} else {
+			cm.notifySubscribers(key, oldValues[key], updates[key])
+		}
+	}
+
+	for structKey := range structKeys {
+		newStruct, err := cm.getIntoStruct(structKey, nil)
+		if err == nil {
+			cm.notifySubscribers(structKey, oldValues[structKey], newStruct)
+		}
+	}
 }

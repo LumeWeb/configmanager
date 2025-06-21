@@ -52,10 +52,9 @@ func (m *MemoryConfigSource) Load(ctx context.Context, cm configManager) error {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
-	for key, value := range m.data {
-		if err := cm.Set(ctx, key, value); err != nil {
-			return err
-		}
+	// Use BulkSetAtomic for atomic loading of all values
+	if err := cm.BulkSetAtomic(ctx, m.data); err != nil {
+		return fmt.Errorf("failed to bulk set config values: %w", err)
 	}
 	return nil
 }

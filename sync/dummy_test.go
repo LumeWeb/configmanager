@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"fmt"
 	"go.uber.org/zap"
 	"testing"
 	"time"
@@ -246,4 +247,57 @@ func (m *mockManager) Set(ctx context.Context, key string, value any) error {
 	}
 	m.data[key] = value
 	return nil
+}
+func (m *mockManager) BulkSet(ctx context.Context, updates map[string]any) error {
+	if m.data == nil {
+		m.data = make(map[string]any)
+	}
+	for k, v := range updates {
+		m.data[k] = v
+	}
+	return nil
+}
+func (m *mockManager) SetAtomic(ctx context.Context, updates map[string]any) error {
+	if m.data == nil {
+		m.data = make(map[string]any)
+	}
+
+	// First validate all updates
+	for key, value := range updates {
+		if value == nil {
+			return fmt.Errorf("nil value for key %s", key)
+		}
+	}
+
+	// Then apply all updates
+	for key, value := range updates {
+		m.data[key] = value
+	}
+	return nil
+}
+
+// BulkSetAtomic sets multiple configuration values atomically.
+// Unlike SetAtomic, validation is deferred until after all values are set,
+// allowing interdependent fields to be updated together.
+func (m *mockManager) BulkSetAtomic(ctx context.Context, updates map[string]any) error {
+	if m.data == nil {
+		m.data = make(map[string]any)
+	}
+
+	// First validate all updates
+	for key, value := range updates {
+		if value == nil {
+			return fmt.Errorf("nil value for key %s", key)
+		}
+	}
+
+	// Then apply all updates
+	for key, value := range updates {
+		m.data[key] = value
+	}
+	return nil
+}
+func (m *mockManager) Exists(key string) bool {
+	_, ok := m.data[key]
+	return ok
 }
