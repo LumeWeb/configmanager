@@ -16,6 +16,7 @@ type ConfigDefaults interface {
 type DefaultConfigSource struct {
 	defaults map[string]any
 	manager  manager
+	tagName  string
 }
 
 type manager interface {
@@ -24,12 +25,45 @@ type manager interface {
 	GetRegisteredStructs() map[string]reflect.Type
 }
 
+// DefaultConfigOptions holds configuration options for DefaultConfigSource
+type DefaultConfigOptions struct {
+	defaults map[string]any
+	tagName  string
+}
+
+// DefaultConfigOption defines the option function type
+type DefaultConfigOption func(*DefaultConfigOptions)
+
+// WithDefaults sets the default values map
+func WithDefaults(defaults map[string]any) DefaultConfigOption {
+	return func(o *DefaultConfigOptions) {
+		o.defaults = defaults
+	}
+}
+
+// WithTagName sets the struct tag name to use (default: "config")
+func WithTagName(tagName string) DefaultConfigOption {
+	return func(o *DefaultConfigOptions) {
+		o.tagName = tagName
+	}
+}
+
 // NewDefaultConfigSource creates a new DefaultConfigSource.
 // The defaults map can contain nested values using dot notation keys (e.g. "database.host").
-func NewDefaultConfigSource(manager manager, defaults map[string]any) *DefaultConfigSource {
+func NewDefaultConfigSource(manager manager, opts ...DefaultConfigOption) *DefaultConfigSource {
+	// Set defaults
+	options := DefaultConfigOptions{
+		tagName: "config",
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	// Flatten nested maps into dot notation keys
 	flatDefaults := make(map[string]any)
-	for key, value := range defaults {
+	for key, value := range options.defaults {
 		if m, ok := value.(map[string]any); ok {
 			for k, v := range flattenMap(m, key) {
 				flatDefaults[k] = v
@@ -38,9 +72,11 @@ func NewDefaultConfigSource(manager manager, defaults map[string]any) *DefaultCo
 			flatDefaults[key] = value
 		}
 	}
+
 	return &DefaultConfigSource{
 		defaults: flatDefaults,
 		manager:  manager,
+		tagName:  options.tagName,
 	}
 }
 
@@ -70,7 +106,27 @@ func (d *DefaultConfigSource) Load(ctx context.Context, cm configManager) error 
 			// Get defaults from the struct
 			if defaults, ok := instance.(ConfigDefaults); ok {
 				for defKey, defValue := range defaults.Defaults() {
-					fullKey := key + "." + defKey // Use dot since we're working with flattened map keys
+					// Find matching field by exact tag or exact field name (with no tag)
+					var tagValue string
+					found := false
+					for i := 0; i < typ.NumField(); i++ {
+						field := typ.Field(i)
+						tag := field.Tag.Get(d.tagName)
+						if tag == defKey {
+							tagValue = tag
+							found = true
+							break
+						}
+						if field.Name == defKey && tag == "" {
+							tagValue = field.Name
+							found = true
+							break
+						}
+					}
+					if !found {
+						continue // Skip if no exact match found
+					}
+					fullKey := key + "." + tagValue // Use dot since we're working with flattened map keys
 					// Only set if key doesn't exist
 					if exists, _, _ := cm.Get(fullKey); exists == nil {
 						if err := cm.Set(ctx, fullKey, defValue); err != nil {
