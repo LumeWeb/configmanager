@@ -31,6 +31,8 @@ type ConfigManagerDefault struct {
 	koanf            *koanf.Koanf
 	sources          []source.ConfigSource
 	logger           *zap.Logger
+	validationEnabled bool
+	validationLock   sync.RWMutex
 	events           event.EventManager[csync.ConfigEvent]
 	flagManager      FlagManager
 	configStructs    map[string]reflect.Type
@@ -173,6 +175,27 @@ func WithDelimiter(delimiter string) ConfigOption {
 	}
 }
 
+// EnableValidation enables validation for all configuration changes
+func (cm *ConfigManagerDefault) EnableValidation() {
+	cm.validationLock.Lock()
+	defer cm.validationLock.Unlock()
+	cm.validationEnabled = true
+}
+
+// DisableValidation disables validation for configuration changes
+func (cm *ConfigManagerDefault) DisableValidation() {
+	cm.validationLock.Lock()
+	defer cm.validationLock.Unlock()
+	cm.validationEnabled = false
+}
+
+// ValidationEnabled returns whether validation is currently enabled
+func (cm *ConfigManagerDefault) ValidationEnabled() bool {
+	cm.validationLock.RLock()
+	defer cm.validationLock.RUnlock()
+	return cm.validationEnabled
+}
+
 // NewConfigManager creates a new ConfigManagerDefault.
 // Sources can be:
 // - string paths (automatically wrapped as file sources)
@@ -210,15 +233,16 @@ func NewConfigManager(sources any, opts ...ConfigOption) (*ConfigManagerDefault,
 	}
 
 	cm := &ConfigManagerDefault{
-		koanf:         k,
-		sources:       configSources,
-		logger:        zap.NewNop(), // Default no-op logger
-		events:        eventMgr,
-		flagManager:   NewFlagManager(),
-		configStructs: make(map[string]reflect.Type),
-		tagName:       "config", // Default tag name
-		registry:      NewDefaultConfigRegistry(),
-		syncConfigNS:  "sync.config", // Default sync config namespace
+		koanf:           k,
+		sources:         configSources,
+		logger:          zap.NewNop(), // Default no-op logger
+		events:          eventMgr,
+		flagManager:     NewFlagManager(),
+		configStructs:   make(map[string]reflect.Type),
+		tagName:         "config", // Default tag name
+		registry:        NewDefaultConfigRegistry(),
+		syncConfigNS:    "sync.config", // Default sync config namespace
+		validationEnabled: true,       // Validation enabled by default
 	}
 
 	for _, opt := range opts {
@@ -265,6 +289,11 @@ func (cm *ConfigManagerDefault) SetupSync(opts ...ConfigOption) error {
 
 // Load loads the initial configuration from the configured sources.
 func (cm *ConfigManagerDefault) Load() error {
+	// Disable validation during initial load to avoid validation errors
+	// from partially loaded configurations
+	cm.DisableValidation()
+	defer cm.EnableValidation()
+
 	for _, _source := range cm.sources {
 		if err := _source.Load(context.Background(), cm); err != nil {
 			return fmt.Errorf("failed to load config from source: %w", err)
@@ -278,6 +307,11 @@ func (cm *ConfigManagerDefault) Load() error {
 				zap.String("source", fmt.Sprintf("%T", _source)),
 				zap.Error(err))
 		}
+	}
+
+	// Now that all sources are loaded, validate all registered structs
+	if err := cm.ValidateRegisteredStructs(); err != nil {
+		return fmt.Errorf("configuration validation failed after load: %w", err)
 	}
 
 	return nil
@@ -551,7 +585,7 @@ func (cm *ConfigManagerDefault) bulkSetAtomicInternal(ctx context.Context, updat
 	}
 
 	// Validate affected structs if needed
-	if validate {
+	if validate && cm.ValidationEnabled() {
 		if err := cm.validateStructUpdates(updates); err != nil {
 			// Revert all changes if validation fails
 			for key, oldValue := range oldValues {
@@ -604,13 +638,15 @@ func (cm *ConfigManagerDefault) BulkSet(ctx context.Context, updates map[string]
 		}
 	}
 
-	// Validate affected structs
-	if err := cm.validateStructUpdates(updates); err != nil {
-		// Revert all changes if validation fails
-		for key, oldValue := range oldValues {
-			_ = cm.koanf.Set(key, oldValue)
+	// Validate affected structs if validation is enabled
+	if cm.ValidationEnabled() {
+		if err := cm.validateStructUpdates(updates); err != nil {
+			// Revert all changes if validation fails
+			for key, oldValue := range oldValues {
+				_ = cm.koanf.Set(key, oldValue)
+			}
+			return err
 		}
-		return err
 	}
 
 	// Notify changes
@@ -671,7 +707,7 @@ func (cm *ConfigManagerDefault) setInternal(ctx context.Context, key string, val
 				zap.Error(err))
 			return fmt.Errorf("failed to push config to sync manager: %w", err)
 		}
-	} else if validate {
+	} else if validate && cm.ValidationEnabled() {
 		if structKey == "" {
 			// No struct association - simple key/value update
 			cm.notifySubscribers(key, oldValue, value)
@@ -690,6 +726,18 @@ func (cm *ConfigManagerDefault) setInternal(ctx context.Context, key string, val
 			}
 
 			// Notify with the updated struct
+			cm.notifySubscribers(structKey, oldValue, newStruct)
+		}
+	} else if validate {
+		// When validation is disabled but validate=true, we still notify subscribers
+		// to maintain consistency in change notifications
+		if structKey == "" {
+			cm.notifySubscribers(key, oldValue, value)
+		} else {
+			newStruct, err := cm.getIntoStruct(structKey, nil)
+			if err != nil {
+				return fmt.Errorf("failed to decode struct for key %s: %w", structKey, err)
+			}
 			cm.notifySubscribers(structKey, oldValue, newStruct)
 		}
 	}
@@ -1149,6 +1197,35 @@ func (cm *ConfigManagerDefault) LoadNamespace(namespace string) error {
 			zap.Error(err))
 	}
 
+	return nil
+}
+
+// ValidateRegisteredStructs validates all registered configuration structs
+func (cm *ConfigManagerDefault) ValidateRegisteredStructs() error {
+	var errs []error
+
+	cm.configStructLock.RLock()
+	defer cm.configStructLock.RUnlock()
+
+	for structKey := range cm.configStructs {
+		if !cm.Exists(structKey) {
+			continue
+		}
+
+		newStruct, err := cm.getIntoStruct(structKey, nil)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to decode struct %s: %w", structKey, err))
+			continue
+		}
+
+		if err := cm.validateValue(structKey, newStruct); err != nil {
+			errs = append(errs, fmt.Errorf("validation failed for struct %s: %w", structKey, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("validation errors in registered structs: %v", errs)
+	}
 	return nil
 }
 

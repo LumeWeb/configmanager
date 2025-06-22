@@ -1085,6 +1085,82 @@ func TestConfigManager_NamespaceKeyHandling(t *testing.T) {
 	}
 }
 
+func TestConfigManager_ValidationControl(t *testing.T) {
+	cm := newTestManager()
+	
+	// Register a struct that requires validation
+	err := cm.RegisterStruct("test.validation", testStruct{})
+	require.NoError(t, err)
+
+	// Validation should be enabled by default
+	assert.True(t, cm.ValidationEnabled())
+
+	// Try setting invalid data - should fail
+	err = cm.Set(context.Background(), "test.validation.name", "")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "validation failed")
+
+	// Disable validation
+	cm.DisableValidation()
+	assert.False(t, cm.ValidationEnabled())
+
+	// Now setting invalid data should succeed
+	err = cm.Set(context.Background(), "test.validation.name", "")
+	assert.NoError(t, err)
+
+	// Re-enable validation
+	cm.EnableValidation()
+	assert.True(t, cm.ValidationEnabled())
+
+	// Setting invalid data should fail again
+	err = cm.Set(context.Background(), "test.validation.age", 0)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
+func TestConfigManager_ValidateRegisteredStructs(t *testing.T) {
+	cm := newTestManager()
+
+	// Register test structs
+	err := cm.RegisterStruct("test.valid", testStruct{})
+	require.NoError(t, err)
+	err = cm.RegisterStruct("test.invalid", testStruct{})
+	require.NoError(t, err)
+
+	// Set valid data for first struct
+	err = cm.BulkSet(context.Background(), map[string]any{
+		"test.valid.name": "valid",
+		"test.valid.age":  25,
+	})
+	require.NoError(t, err)
+
+	// Set invalid data for second struct (bypassing validation)
+	cm.DisableValidation()
+	err = cm.BulkSet(context.Background(), map[string]any{
+		"test.invalid.name": "",
+		"test.invalid.age":  0,
+	})
+	require.NoError(t, err)
+	cm.EnableValidation()
+
+	// Validate should fail due to invalid struct
+	err = cm.ValidateRegisteredStructs()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "validation failed for struct test.invalid")
+	assert.Contains(t, err.Error(), "name")
+	assert.Contains(t, err.Error(), "age")
+
+	// Fix invalid struct and validate again
+	err = cm.BulkSet(context.Background(), map[string]any{
+		"test.invalid.name": "fixed",
+		"test.invalid.age":  1,
+	})
+	require.NoError(t, err)
+
+	err = cm.ValidateRegisteredStructs()
+	assert.NoError(t, err)
+}
+
 func TestConfigManager_ValidateWithZogSchema(t *testing.T) {
 	cm, _ := NewConfigManager([]source.ConfigSource{})
 	logger := zap.NewNop()

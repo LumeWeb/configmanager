@@ -28,6 +28,9 @@ type Manager interface {
 	Shutdown() error
 	Validate(keyPrefix ...string) error
 	Persist(keyPrefix ...string) error
+	EnableValidation()
+	DisableValidation()
+	ValidationEnabled() bool
 
 	// Flag management
 	FlagManager() FlagManager
@@ -64,6 +67,7 @@ type Manager interface {
 	// Struct registration
 	RegisterStruct(key string, cfg any) error
 	GetRegisteredStructs() map[string]reflect.Type
+	ValidateRegisteredStructs() error
 
 	// Namespace management
 	RegisterNamespace(namespace string, src source.ConfigSource)
