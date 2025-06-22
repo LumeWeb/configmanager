@@ -106,27 +106,30 @@ func (d *DefaultConfigSource) Load(ctx context.Context, cm configManager) error 
 			// Get defaults from the struct
 			if defaults, ok := instance.(ConfigDefaults); ok {
 				for defKey, defValue := range defaults.Defaults() {
-					// Find matching field by exact tag or exact field name (with no tag)
-					var tagValue string
+					// Find field with matching name (case sensitive)
+					var fieldName string
 					found := false
 					for i := 0; i < typ.NumField(); i++ {
 						field := typ.Field(i)
-						tag := field.Tag.Get(d.tagName)
-						if tag == defKey {
-							tagValue = tag
-							found = true
-							break
+						// Skip unexported fields
+						if field.PkgPath != "" {
+							continue
 						}
-						if field.Name == defKey && tag == "" {
-							tagValue = field.Name
+						if field.Name == defKey {
+							// Use tag if present, otherwise use field name
+							if tag := field.Tag.Get(d.tagName); tag != "" {
+								fieldName = tag
+							} else {
+								fieldName = field.Name
+							}
 							found = true
 							break
 						}
 					}
 					if !found {
-						continue // Skip if no exact match found
+						continue // Skip if no matching field found
 					}
-					fullKey := key + "." + tagValue // Use dot since we're working with flattened map keys
+					fullKey := key + "." + fieldName // Use dot since we're working with flattened map keys
 					// Only set if key doesn't exist
 					if exists, _, _ := cm.Get(fullKey); exists == nil {
 						if err := cm.Set(ctx, fullKey, defValue); err != nil {
