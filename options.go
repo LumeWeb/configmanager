@@ -24,30 +24,6 @@ func WithConfigStruct(key string, cfg any) ConfigOption {
 	}
 }
 
-// RegisterStruct registers a configuration struct type for a key at runtime.
-// Returns an error if the key is already registered to a different type.
-func (cm *ConfigManagerDefault) RegisterStruct(key string, cfg any) error {
-	cm.configStructLock.Lock()
-	defer cm.configStructLock.Unlock()
-
-	typ := reflect.TypeOf(cfg)
-	if typ.Kind() == reflect.Ptr {
-		typ = typ.Elem()
-	}
-
-	// Check if already registered with same type
-	if existing, ok := cm.configStructs[key]; ok {
-		if existing != typ {
-			return fmt.Errorf("config struct for key '%s' already registered with different type (%v vs %v)",
-				key, existing, typ)
-		}
-		return nil // same type, no error
-	}
-
-	cm.configStructs[key] = typ
-	return nil
-}
-
 // WithFlags is a ConfigOption that sets flags for configuration keys
 func WithFlags(flags map[string][]string) ConfigOption {
 	return func(cm *ConfigManagerDefault) error {

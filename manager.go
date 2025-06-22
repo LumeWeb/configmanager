@@ -27,22 +27,22 @@ const (
 
 // ConfigManagerDefault is the central point of interaction for accessing and managing configuration.
 type ConfigManagerDefault struct {
-	syncMgr          csync.Manager
-	koanf            *koanf.Koanf
-	sources          []source.ConfigSource
-	logger           *zap.Logger
+	syncMgr           csync.Manager
+	koanf             *koanf.Koanf
+	sources           []source.ConfigSource
+	logger            *zap.Logger
 	validationEnabled bool
-	validationLock   sync.RWMutex
-	events           event.EventManager[csync.ConfigEvent]
-	flagManager      FlagManager
-	configStructs    map[string]reflect.Type
-	configStructLock sync.RWMutex
-	configFile       string
-	configDir        string
-	tagName          string
-	registry         ConfigRegistry
-	syncConfigNS     string // Namespace for sync client configuration
-	delimiter        string // Custom delimiter for nested keys
+	validationLock    sync.RWMutex
+	events            event.EventManager[csync.ConfigEvent]
+	flagManager       FlagManager
+	configStructs     map[string]reflect.Type
+	configStructLock  sync.RWMutex
+	configFile        string
+	configDir         string
+	tagName           string
+	registry          ConfigRegistry
+	syncConfigNS      string // Namespace for sync client configuration
+	delimiter         string // Custom delimiter for nested keys
 }
 
 // Ensure ConfigManagerDefault implements Manager interface
@@ -233,16 +233,16 @@ func NewConfigManager(sources any, opts ...ConfigOption) (*ConfigManagerDefault,
 	}
 
 	cm := &ConfigManagerDefault{
-		koanf:           k,
-		sources:         configSources,
-		logger:          zap.NewNop(), // Default no-op logger
-		events:          eventMgr,
-		flagManager:     NewFlagManager(),
-		configStructs:   make(map[string]reflect.Type),
-		tagName:         "config", // Default tag name
-		registry:        NewDefaultConfigRegistry(),
-		syncConfigNS:    "sync.config", // Default sync config namespace
-		validationEnabled: true,       // Validation enabled by default
+		koanf:             k,
+		sources:           configSources,
+		logger:            zap.NewNop(), // Default no-op logger
+		events:            eventMgr,
+		flagManager:       NewFlagManager(),
+		configStructs:     make(map[string]reflect.Type),
+		tagName:           "config", // Default tag name
+		registry:          NewDefaultConfigRegistry(),
+		syncConfigNS:      "sync.config", // Default sync config namespace
+		validationEnabled: true,          // Validation enabled by default
 	}
 
 	for _, opt := range opts {
@@ -413,6 +413,30 @@ func (cm *ConfigManagerDefault) Get(key string, target ...any) (any, any, error)
 	}
 }
 
+// RegisterStruct registers a configuration struct type for a key at runtime.
+// Returns an error if the key is already registered to a different type.
+func (cm *ConfigManagerDefault) RegisterStruct(key string, cfg any) error {
+	cm.configStructLock.Lock()
+	defer cm.configStructLock.Unlock()
+
+	typ := reflect.TypeOf(cfg)
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+
+	// Check if already registered with same type
+	if existing, ok := cm.configStructs[key]; ok {
+		if existing != typ {
+			return fmt.Errorf("config struct for key '%s' already registered with different type (%v vs %v)",
+				key, existing, typ)
+		}
+		return nil // same type, no error
+	}
+
+	cm.configStructs[key] = typ
+	return nil
+}
+
 // getIntoStruct decodes configuration into a registered struct type (used by RegisterStruct)
 func (cm *ConfigManagerDefault) getIntoStruct(key string, target any) (any, error) {
 	if !cm.hasConfigStruct(key) {
@@ -426,36 +450,24 @@ func (cm *ConfigManagerDefault) getIntoStruct(key string, target any) (any, erro
 	// Create new instance if target is nil
 	var cfg any
 	if target == nil {
-		if structType.Kind() == reflect.Ptr {
-			cfg = reflect.New(structType.Elem()).Interface()
-		} else {
-			cfg = reflect.New(structType).Interface()
-		}
+		// Always create pointer to registered value type
+		cfg = reflect.New(structType).Interface()
 	} else {
-		// Get the actual type of target (handling pointers)
 		targetType := reflect.TypeOf(target)
-
-		// Allow both pointer and value targets as long as underlying type matches
-		var targetElemType reflect.Type
+		// Dereference pointer target to match registered value type
 		if targetType.Kind() == reflect.Ptr {
-			targetElemType = targetType.Elem()
+			targetType = targetType.Elem()
+			if targetType != structType {
+				return nil, fmt.Errorf("target type %v does not match registered type %v",
+					targetType, structType)
+			}
+			cfg = reflect.ValueOf(target).Elem().Interface()
 		} else {
-			targetElemType = targetType
-		}
-
-		// Check if registered type matches target type (handling both pointer and value cases)
-		if targetElemType != structType &&
-			!(structType.Kind() == reflect.Ptr && structType.Elem() == targetElemType) {
-			return nil, fmt.Errorf("target type %v does not match registered type %v",
-				targetType, structType)
-		}
-
-		// If target is non-pointer but registered type is pointer, create new pointer
-		if targetType.Kind() != reflect.Ptr && structType.Kind() == reflect.Ptr {
-			newPtr := reflect.New(targetType)
-			newPtr.Elem().Set(reflect.ValueOf(target))
-			cfg = newPtr.Interface()
-		} else {
+			// For value target, must match registered type exactly
+			if targetType != structType {
+				return nil, fmt.Errorf("target type %v does not match registered type %v",
+					targetType, structType)
+			}
 			cfg = target
 		}
 	}
@@ -557,7 +569,7 @@ func (cm *ConfigManagerDefault) SetAtomic(ctx context.Context, updates map[strin
 // BulkSetAtomic sets multiple configuration values atomically. All updates are applied first,
 // then validation is performed on all affected structs. If validation fails, all changes
 // are rolled back. This is different from SetAtomic which validates each change individually.
-// 
+//
 // The method ensures either all updates succeed or none are applied (atomicity).
 // Returns an error if validation fails or if any update fails to apply.
 func (cm *ConfigManagerDefault) BulkSetAtomic(ctx context.Context, updates map[string]any) error {
