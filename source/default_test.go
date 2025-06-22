@@ -235,8 +235,8 @@ type testConfigWithDefaults struct {
 
 func (t *testConfigWithDefaults) Defaults() map[string]any {
 	return map[string]any{
-		"host": "default_host",
-		"port": 8080,
+		"Host": "default_host",
+		"Port": 8080,
 	}
 }
 
@@ -391,7 +391,7 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 
 	t.Run("order of loading: struct defaults first, then static defaults", func(t *testing.T) {
 		mgr, dcs := setupDefaultConfigTest(t, map[string]any{"conflict.host": "static_host_override"}, "")
-		err := mgr.RegisterStruct("conflict", testConfigWithDefaults{}) // Defaults host to "default_host"
+		err := mgr.RegisterStruct("conflict", testConfigWithDefaults{}) // Defaults Host to "default_host"
 		assert.NoError(t, err)
 
 		err = dcs.Load(ctx, mgr)
@@ -429,11 +429,11 @@ type testConfig struct {
 
 func (t *testConfig) Defaults() map[string]any {
 	return map[string]any{
-		"field_one":   "value_one",   // Exact tag match
-		"FieldTwo":    "value_two",   // Exact field name match (no tag)
-		"fieldThree":  "value_three", // Should be skipped (unexported)
-		"field_four":  "value_four",  // Should be skipped (no match)
-		"FieldTwoAlt": "value_alt",   // Should be skipped (no match)
+		"FieldOne":   "value_one",   // Field name match (tag is "field_one")
+		"FieldTwo":   "value_two",   // Field name match (no tag)
+		"fieldThree": "value_three", // Should be skipped (unexported)
+		"field_four": "value_four",  // Should be skipped (no match)
+		"FieldTwoAlt": "value_alt",  // Should be skipped (no match)
 	}
 }
 
@@ -448,8 +448,8 @@ func TestDefaultConfigSource_Load_StructFieldMatching(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Check expected values were set
-	mgr.assertValue(t, "test.field_one", "value_one")
-	mgr.assertValue(t, "test.FieldTwo", "value_two")
+	mgr.assertValue(t, "test.field_one", "value_one") // FieldOne's tag is "field_one"
+	mgr.assertValue(t, "test.FieldTwo", "value_two")  // FieldTwo has no tag so uses field name
 
 	// Check unexpected values were NOT set
 	_, _, err = mgr.Get("test.field_three")
