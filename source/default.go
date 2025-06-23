@@ -92,6 +92,7 @@ func NewDefaultConfigSource(manager manager, opts ...DefaultConfigOption) *Defau
 		defaults: flatDefaults,
 		manager:  manager,
 		tagName:  options.tagName,
+		global:   options.global,
 	}
 }
 
