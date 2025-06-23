@@ -433,11 +433,11 @@ type testConfig struct {
 
 func (t *testConfig) Defaults() map[string]any {
 	return map[string]any{
-		"FieldOne":   "value_one",   // Field name match (tag is "field_one")
-		"FieldTwo":   "value_two",   // Field name match (no tag)
-		"fieldThree": "value_three", // Should be skipped (unexported)
-		"field_four": "value_four",  // Should be skipped (no match)
-		"FieldTwoAlt": "value_alt",  // Should be skipped (no match)
+		"FieldOne":    "value_one",   // Field name match (tag is "field_one")
+		"FieldTwo":    "value_two",   // Field name match (no tag)
+		"fieldThree":  "value_three", // Should be skipped (unexported)
+		"field_four":  "value_four",  // Should be skipped (no match)
+		"FieldTwoAlt": "value_alt",   // Should be skipped (no match)
 		"Nested": map[string]any{
 			"ChildOne": "nested_value",
 			"ChildTwo": 42,
@@ -451,15 +451,15 @@ func TestDefaultConfigSource_Load_StructFieldMatching(t *testing.T) {
 	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
 	err := dcs.manager.RegisterStruct("test", &testConfig{})
 	assert.NoError(t, err)
-	
+
 	err = dcs.Load(ctx, mgr)
 	assert.NoError(t, err)
 
 	// Check expected values were set
-	mgr.assertValue(t, "test.field_one", "value_one") // FieldOne's tag is "field_one"
-	mgr.assertValue(t, "test.FieldTwo", "value_two")  // FieldTwo has no tag so uses field name
+	mgr.assertValue(t, "test.field_one", "value_one")           // FieldOne's tag is "field_one"
+	mgr.assertValue(t, "test.FieldTwo", "value_two")            // FieldTwo has no tag so uses field name
 	mgr.assertValue(t, "test.nested.child_one", "nested_value") // Nested field with tag
-	mgr.assertValue(t, "test.nested.ChildTwo", 42)    // Nested field without tag
+	mgr.assertValue(t, "test.nested.ChildTwo", 42)              // Nested field without tag
 
 	// Check unexpected values were NOT set
 	_, _, err = mgr.Get("test.field_three")
@@ -470,6 +470,153 @@ func TestDefaultConfigSource_Load_StructFieldMatching(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestProcessStructDefaults_EmptyDefaults(t *testing.T) {
+	ctx := context.Background()
+	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
+
+	// Register a struct with no defaults
+	type EmptyStruct struct {
+		Field string `config:"field"`
+	}
+	err := mgr.RegisterStruct("empty", EmptyStruct{})
+	assert.NoError(t, err)
+
+	// Load the defaults - this internally calls processStructDefaults
+	err = dcs.Load(ctx, mgr)
+	assert.NoError(t, err)
+	assert.False(t, mgr.Exists("empty.field"))
+}
+
+func TestProcessDirectDefaults_NonStructFields(t *testing.T) {
+	ctx := context.Background()
+
+	type TestStruct struct {
+		StrField string `config:"str_field"`
+		IntField int    `config:"int_field"`
+	}
+
+	// Create defaults that match the struct fields
+	defaults := map[string]any{
+		"test": map[string]any{
+			"str_field": "default_str",
+			"int_field": 42,
+		},
+	}
+
+	mgr, dcs := setupDefaultConfigTest(t, defaults, "config")
+
+	// Register the struct
+	err := mgr.RegisterStruct("test", TestStruct{})
+	assert.NoError(t, err)
+
+	// Load the defaults
+	err = dcs.Load(ctx, mgr)
+	assert.NoError(t, err)
+
+	// Verify keys were set
+	assert.True(t, mgr.Exists("test.str_field"))
+	assert.True(t, mgr.Exists("test.int_field"))
+
+	// Get values directly from manager to verify
+	strVal, _, err := mgr.Get("test.str_field")
+	assert.NoError(t, err)
+	assert.Equal(t, "default_str", strVal)
+
+	intVal, _, err := mgr.Get("test.int_field")
+	assert.NoError(t, err)
+	assert.Equal(t, 42, intVal)
+}
+
+func TestProcessNestedStructs_AllFields(t *testing.T) {
+	ctx := context.Background()
+	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
+
+	type Nested struct {
+		Child string `config:"child"`
+	}
+	type Parent struct {
+		Nested1 Nested `config:"nested1"`
+		Nested2 Nested `config:"nested2"`
+	}
+
+	// Register the struct with defaults
+	err := mgr.RegisterStruct("test", ParentWithDefaults{})
+	assert.NoError(t, err)
+
+	// Load the defaults - this internally processes nested structs
+	err = dcs.Load(ctx, mgr)
+	assert.NoError(t, err)
+
+	// Verify nested values were set correctly
+	mgr.assertValue(t, "test.nested1.child", "child1")
+	assert.False(t, mgr.Exists("test.nested2.child"))
+}
+
+type TestFindMatchingFieldStruct struct {
+	FieldOne   string `config:"field_one"`
+	FieldTwo   string `config:"field_two"`
+	fieldThree string `config:"field_three"` // Unexported
+}
+
+func (t *TestFindMatchingFieldStruct) Defaults() map[string]any {
+	return map[string]any{
+		"FieldOne": "value_one",
+		"FieldTwo": "value_two",
+	}
+}
+
+func TestFindMatchingField_Indirect(t *testing.T) {
+	// Implement ConfigDefaults to test field matching behavior
+	type TestConfig struct {
+		TestFindMatchingFieldStruct
+	}
+
+	cfg := &TestConfig{}
+
+	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
+	err := mgr.RegisterStruct("test", cfg)
+	assert.NoError(t, err)
+
+	err = dcs.Load(context.Background(), mgr)
+	assert.NoError(t, err)
+
+	// Verify expected fields were set
+	mgr.assertValue(t, "test.field_one", "value_one")
+	mgr.assertValue(t, "test.field_two", "value_two")
+
+	// Verify unexpected fields were NOT set
+	_, _, err = mgr.Get("test.field_three")
+	assert.Error(t, err)
+	_, _, err = mgr.Get("test.nonexistent")
+	assert.Error(t, err)
+}
+
+func TestSetDefaultValue_Indirect(t *testing.T) {
+	ctx := context.Background()
+
+	// Create defaults that will be loaded
+	defaults := map[string]any{
+		"test.key":     "default_value",
+		"existing.key": "default_value",
+	}
+
+	mgr, dcs := setupDefaultConfigTest(t, defaults, "")
+
+	// Set an existing value first
+	err := mgr.Set(ctx, "existing.key", "existing_value")
+	assert.NoError(t, err)
+
+	// Load the defaults - this internally calls setDefaultValue
+	err = dcs.Load(ctx, mgr)
+	assert.NoError(t, err)
+
+	// Verify new key got default value
+	mgr.assertValue(t, "test.key", "default_value")
+
+	// Verify existing key was NOT overwritten
+	mgr.assertValue(t, "existing.key", "existing_value")
+}
+
 func TestDefaultConfigSource_Watch(t *testing.T) {
 	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
 	ctx := context.Background()
@@ -478,4 +625,21 @@ func TestDefaultConfigSource_Watch(t *testing.T) {
 		assert.Fail(t, "Watch callback should not be called for DefaultConfigSource")
 	})
 	assert.NoError(t, err, "Watch should return nil and be a no-op")
+}
+
+type Nested struct {
+	Child string `config:"child"`
+}
+
+type ParentWithDefaults struct {
+	Nested1 Nested `config:"nested1"`
+	Nested2 Nested `config:"nested2"`
+}
+
+func (p *ParentWithDefaults) Defaults() map[string]any {
+	return map[string]any{
+		"Nested1": map[string]any{
+			"Child": "child1",
+		},
+	}
 }

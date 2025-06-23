@@ -106,16 +106,34 @@ func (d *DefaultConfigSource) Load(ctx context.Context, cm configManager) error 
 	return d.loadStaticDefaults(ctx, cm)
 }
 
+// findConfigDefaults searches for ConfigDefaults implementation in a type and its embedded structs
+func (d *DefaultConfigSource) findConfigDefaults(typ reflect.Type) (ConfigDefaults, bool) {
+	// Check if the type itself implements ConfigDefaults
+	if ireflect.ImplementsConfigDefaults(typ) {
+		instance := reflect.New(typ).Interface()
+		if defaults, ok := instance.(ConfigDefaults); ok {
+			return defaults, true
+		}
+	}
+
+	// Check embedded structs
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if field.Anonymous && field.Type.Kind() == reflect.Struct {
+			if defaults, found := d.findConfigDefaults(field.Type); found {
+				return defaults, true
+			}
+		}
+	}
+
+	return nil, false
+}
+
 // loadStructDefaults processes all registered structs that implement ConfigDefaults
 func (d *DefaultConfigSource) loadStructDefaults(ctx context.Context, cm configManager) error {
 	for key, typ := range d.manager.GetRegisteredStructs() {
-		if !ireflect.ImplementsConfigDefaults(typ) {
-			continue
-		}
-
-		instance := reflect.New(typ).Interface()
-		defaults, ok := instance.(ConfigDefaults)
-		if !ok {
+		defaults, found := d.findConfigDefaults(typ)
+		if !found {
 			continue
 		}
 
@@ -128,34 +146,87 @@ func (d *DefaultConfigSource) loadStructDefaults(ctx context.Context, cm configM
 
 // processStructDefaults recursively processes struct fields and their defaults
 func (d *DefaultConfigSource) processStructDefaults(ctx context.Context, cm configManager, prefix string, typ reflect.Type, defaults map[string]any) error {
+	if err := d.processDirectDefaults(ctx, cm, prefix, typ, defaults); err != nil {
+		return err
+	}
+	return d.processNestedStructs(ctx, cm, prefix, typ, defaults)
+}
+
+// processDirectDefaults processes all direct (non-struct) defaults for the current struct level
+func (d *DefaultConfigSource) processDirectDefaults(ctx context.Context, cm configManager, prefix string, typ reflect.Type, defaults map[string]any) error {
 	for defKey, defValue := range defaults {
 		fieldName, fieldType, found := d.findMatchingField(typ, defKey)
 		if !found {
 			continue
 		}
 
-		fullKey := prefix + "." + fieldName
-
-		// Handle nested structs recursively
-		if fieldType.Kind() == reflect.Struct {
-			nestedDefaults, ok := defValue.(map[string]any)
-			if !ok {
-				continue
-			}
-			if err := d.processStructDefaults(ctx, cm, fullKey, fieldType, nestedDefaults); err != nil {
-				return err
-			}
-			continue
+		fullKey := prefix
+		if prefix != "" {
+			fullKey += "." + fieldName
+		} else {
+			fullKey = fieldName
 		}
 
-		// Only set if key doesn't exist
-		if !cm.Exists(fullKey) {
-			if err := cm.Set(ctx, fullKey, defValue); err != nil {
-				return fmt.Errorf("failed to set default value for key %s: %w", fullKey, err)
+		if fieldType.Kind() != reflect.Struct {
+			if err := d.setDefaultValue(ctx, cm, fullKey, defValue); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
+}
+
+// processNestedStructs processes all nested struct fields recursively
+func (d *DefaultConfigSource) processNestedStructs(ctx context.Context, cm configManager, prefix string, typ reflect.Type, defaults map[string]any) error {
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if field.PkgPath != "" { // Skip unexported fields
+			continue
+		}
+
+		fieldName := d.getFieldName(field)
+		fullKey := fieldName
+		if prefix != "" {
+			fullKey = prefix + "." + fieldName
+		}
+
+		if field.Type.Kind() == reflect.Struct {
+			nestedDefaults := d.getNestedDefaults(field.Name, defaults)
+			if err := d.processStructDefaults(ctx, cm, fullKey, field.Type, nestedDefaults); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// setDefaultValue sets a default value if the key doesn't exist
+func (d *DefaultConfigSource) setDefaultValue(ctx context.Context, cm configManager, key string, value any) error {
+	if !cm.Exists(key) {
+		if err := cm.Set(ctx, key, value); err != nil {
+			return fmt.Errorf("failed to set default value for key %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
+// getFieldName returns the field name considering its tag
+func (d *DefaultConfigSource) getFieldName(field reflect.StructField) string {
+	if tagName := field.Tag.Get(d.tagName); tagName != "" {
+		return tagName
+	}
+	return field.Name
+}
+
+// getNestedDefaults extracts nested defaults for a struct field
+func (d *DefaultConfigSource) getNestedDefaults(fieldName string, defaults map[string]any) map[string]any {
+	nestedDefaults := make(map[string]any)
+	if defValue, exists := defaults[fieldName]; exists {
+		if nd, ok := defValue.(map[string]any); ok {
+			nestedDefaults = nd
+		}
+	}
+	return nestedDefaults
 }
 
 // findMatchingField finds a struct field matching the given name
@@ -164,6 +235,16 @@ func (d *DefaultConfigSource) findMatchingField(typ reflect.Type, fieldName stri
 		field := typ.Field(i)
 		// Skip unexported fields
 		if field.PkgPath != "" {
+			continue
+		}
+
+		// Handle embedded structs
+		if field.Anonymous {
+			if field.Type.Kind() == reflect.Struct {
+				if name, fieldType, found := d.findMatchingField(field.Type, fieldName); found {
+					return name, fieldType, true
+				}
+			}
 			continue
 		}
 
