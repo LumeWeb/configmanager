@@ -425,6 +425,10 @@ type testConfig struct {
 	FieldOne   string `config:"field_one"`
 	FieldTwo   string // No tag
 	fieldThree string `config:"field_three"` // Unexported
+	Nested     struct {
+		ChildOne string `config:"child_one"`
+		ChildTwo int
+	} `config:"nested"`
 }
 
 func (t *testConfig) Defaults() map[string]any {
@@ -434,6 +438,10 @@ func (t *testConfig) Defaults() map[string]any {
 		"fieldThree": "value_three", // Should be skipped (unexported)
 		"field_four": "value_four",  // Should be skipped (no match)
 		"FieldTwoAlt": "value_alt",  // Should be skipped (no match)
+		"Nested": map[string]any{
+			"ChildOne": "nested_value",
+			"ChildTwo": 42,
+		},
 	}
 }
 
@@ -450,6 +458,8 @@ func TestDefaultConfigSource_Load_StructFieldMatching(t *testing.T) {
 	// Check expected values were set
 	mgr.assertValue(t, "test.field_one", "value_one") // FieldOne's tag is "field_one"
 	mgr.assertValue(t, "test.FieldTwo", "value_two")  // FieldTwo has no tag so uses field name
+	mgr.assertValue(t, "test.nested.child_one", "nested_value") // Nested field with tag
+	mgr.assertValue(t, "test.nested.ChildTwo", 42)    // Nested field without tag
 
 	// Check unexpected values were NOT set
 	_, _, err = mgr.Get("test.field_three")
