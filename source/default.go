@@ -41,24 +41,24 @@ type DefaultConfigOptions struct {
 // DefaultConfigOption defines the option function type
 type DefaultConfigOption func(*DefaultConfigOptions)
 
-// WithDefaults sets the default values map
-func WithDefaults(defaults map[string]any) DefaultConfigOption {
+// WithDefaultSourceDefaults sets the default values map
+func WithDefaultSourceDefaults(defaults map[string]any) DefaultConfigOption {
 	return func(o *DefaultConfigOptions) {
 		o.defaults = defaults
 	}
 }
 
-// WithTagName sets the struct tag name to use (default: "config")
-func WithTagName(tagName string) DefaultConfigOption {
+// WithDefaultSourceTagName sets the struct tag name to use (default: "config")
+func WithDefaultSourceTagName(tagName string) DefaultConfigOption {
 	return func(o *DefaultConfigOptions) {
 		o.tagName = tagName
 	}
 }
 
-// WithGlobal sets whether this source should be loaded globally
-func WithGlobal(global bool) DefaultConfigOption {
+// WithDefaultSourceGlobal marks this source to be loaded globally
+func WithDefaultSourceGlobal() DefaultConfigOption {
 	return func(o *DefaultConfigOptions) {
-		o.global = global
+		o.global = true
 	}
 }
 
