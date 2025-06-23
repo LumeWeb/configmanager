@@ -461,14 +461,15 @@ func (cm *ConfigManagerDefault) getIntoStruct(key string, target any) (any, erro
 				return nil, fmt.Errorf("target type %v does not match registered type %v",
 					targetType, structType)
 			}
-			cfg = reflect.ValueOf(target).Elem().Interface()
+			cfg = target
 		} else {
 			// For value target, must match registered type exactly
 			if targetType != structType {
 				return nil, fmt.Errorf("target type %v does not match registered type %v",
 					targetType, structType)
 			}
-			cfg = target
+			// Return error for value targets since we can't set into them
+			return nil, fmt.Errorf("target must be a pointer to decode into, got %T", target)
 		}
 	}
 
@@ -1087,6 +1088,13 @@ func (cm *ConfigManagerDefault) Delete(key string) {
 }
 
 // Delim returns the delimiter used for nested keys
+func (cm *ConfigManagerDefault) Root(target any) (any, error) {
+	if !cm.hasConfigStruct("") {
+		return nil, fmt.Errorf("no root configuration struct registered - use RegisterStruct(\"\", yourStruct{})")
+	}
+	return cm.getIntoStruct("", target)
+}
+
 func (cm *ConfigManagerDefault) Delim() string {
 	if cm.delimiter != "" {
 		return cm.delimiter
