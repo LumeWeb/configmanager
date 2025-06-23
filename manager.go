@@ -360,7 +360,13 @@ func (cm *ConfigManagerDefault) loadSource(src source.ConfigSource) error {
 		namespace = ns
 	}
 
-	// Create throwaway copy
+	// Check if source should be loaded globally
+	if globalSrc, ok := src.(source.GlobalConfigSource); ok && globalSrc.IsGlobal() {
+		// Load directly into main config manager
+		return src.Load(context.Background(), cm)
+	}
+
+	// Create throwaway copy for isolated loading
 	throwawayCM := cm.copy()
 
 	// Load into throwaway copy

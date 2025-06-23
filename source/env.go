@@ -13,16 +13,34 @@ import (
 type EnvConfigSource struct {
 	prefix    string
 	delimiter string
+	global    bool // Controls whether this source should be loaded globally
+}
+
+// IsGlobal implements GlobalConfigSource
+func (e *EnvConfigSource) IsGlobal() bool {
+	return e.global
 }
 
 // NewEnvConfigSource creates a new EnvConfigSource with optional prefix and delimiter.
 // The prefix is prepended to environment variable names (e.g. "APP_").
 // The delimiter is used to split nested keys (e.g. "_" for "APP_DB_HOST").
-func NewEnvConfigSource(prefix, delimiter string) *EnvConfigSource {
-	return &EnvConfigSource{
+type EnvConfigOption func(*EnvConfigSource)
+
+func WithEnvGlobal() EnvConfigOption {
+	return func(e *EnvConfigSource) {
+		e.global = true
+	}
+}
+
+func NewEnvConfigSource(prefix, delimiter string, opts ...EnvConfigOption) *EnvConfigSource {
+	e := &EnvConfigSource{
 		prefix:    prefix,
 		delimiter: delimiter,
 	}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
 
 // Load loads the configuration from environment variables into the config manager.

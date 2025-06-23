@@ -14,6 +14,13 @@ type ConfigSource interface {
 	Watch(ctx context.Context, cm configManager, onChange WatchOnChangeCallback) error
 }
 
+// GlobalConfigSource marks a ConfigSource that should be loaded globally without namespace isolation
+type GlobalConfigSource interface {
+	ConfigSource
+	// IsGlobal returns true if this source should be loaded globally
+	IsGlobal() bool
+}
+
 // WatchAllChanges is a special value that indicates all configuration values may have changed.
 // This should be used when the source detects a broad change but can't determine exactly which keys changed.
 const WatchAllChanges = "*"
