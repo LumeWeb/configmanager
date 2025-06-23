@@ -23,6 +23,8 @@ type ConfigRegistry interface {
 	Unregister(namespace string)
 	// GetSource returns the ConfigSource for a namespace
 	GetSource(namespace string) (source.ConfigSource, bool)
+	// GetNamespace returns the namespace for a ConfigSource
+	GetNamespace(src source.ConfigSource) (string, bool)
 	// ListNamespaces returns all registered namespaces
 	ListNamespaces() []string
 	// FindMostSpecificNamespace finds the most specific namespace for a given key
@@ -69,6 +71,18 @@ func (r *DefaultConfigRegistry) ListNamespaces() []string {
 		namespaces = append(namespaces, ns)
 	}
 	return namespaces
+}
+
+// GetNamespace returns the namespace for a ConfigSource by doing a reverse lookup
+func (r *DefaultConfigRegistry) GetNamespace(src source.ConfigSource) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for ns, s := range r.namespaces {
+		if s == src {
+			return ns, true
+		}
+	}
+	return "", false
 }
 
 func (r *DefaultConfigRegistry) FindMostSpecificNamespace(key string, delim string) (NamespaceSource, string) {

@@ -107,4 +107,28 @@ func TestDefaultConfigRegistry(t *testing.T) {
 		<-done
 		<-done
 	})
+
+	t.Run("GetNamespace", func(t *testing.T) {
+		reg := NewDefaultConfigRegistry()
+		src1 := source.NewMemoryConfigSource(nil)
+		src2 := source.NewMemoryConfigSource(nil)
+
+		reg.Register("ns1", src1)
+		reg.Register("ns2", src2)
+
+		// Test getting namespace for registered source
+		ns, ok := reg.GetNamespace(src1)
+		assert.True(t, ok)
+		assert.Equal(t, "ns1", ns)
+
+		ns, ok = reg.GetNamespace(src2)
+		assert.True(t, ok)
+		assert.Equal(t, "ns2", ns)
+
+		// Test getting namespace for unregistered source
+		unregisteredSrc := source.NewMemoryConfigSource(nil)
+		ns, ok = reg.GetNamespace(unregisteredSrc)
+		assert.False(t, ok)
+		assert.Empty(t, ns)
+	})
 }

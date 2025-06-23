@@ -20,7 +20,7 @@ type ConfigSchemaProvider interface {
 type ConfigChangeCallback func(key string, value any) error
 
 // SubscriptionCallback is the function type for configuration change subscriptions
-type SubscriptionCallback func(keyPrefix string)
+type SubscriptionCallback func(pattern, key string, value any)
 
 type Manager interface {
 	// Core operations

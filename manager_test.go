@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/Oudwins/zog"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
 	"reflect"
 	"strings"
@@ -59,6 +60,32 @@ func newTestManagerWithData(data map[string]any) *ConfigManagerDefault {
 
 func newTestManager() *ConfigManagerDefault {
 	return newTestManagerWithData(nil)
+}
+
+func TestConfigManager_Copy(t *testing.T) {
+	cm := newTestManager()
+
+	// Set some state
+	cm.Set(context.Background(), "test.key", "value")
+	cm.RegisterStruct("test.struct", struct{}{})
+	cm.DisableValidation()
+
+	// Create copy
+	copy := cm.copy()
+
+	// Verify copied state
+	assert.NotSame(t, cm, copy)
+	assert.NotSame(t, cm.koanf, copy.koanf)
+	assert.Equal(t, cm.sources, copy.sources)
+	assert.Equal(t, cm.logger, copy.logger)
+	assert.Equal(t, cm.configStructs, copy.configStructs)
+	assert.Equal(t, cm.validationEnabled, copy.validationEnabled)
+
+	// Verify copy has empty config data
+	assert.Empty(t, copy.All())
+
+	// Verify validation state is preserved
+	assert.False(t, copy.ValidationEnabled())
 }
 
 func TestNewConfigManager(t *testing.T) {
@@ -191,7 +218,7 @@ func TestConfigManager_WildcardSubscriptions(t *testing.T) {
 			// Subscribe to all patterns for this test case
 			var unsubs []func()
 			for _, pattern := range tc.patterns {
-				unsub := cm.Subscribe(pattern, func(matchedPattern string) {
+				unsub := cm.Subscribe(pattern, func(matchedPattern, key string, value any) {
 					mu.Lock()
 					matchedPatterns = append(matchedPatterns, pattern)
 					mu.Unlock()
@@ -219,7 +246,7 @@ func TestConfigManager_WildcardSubscriptions(t *testing.T) {
 		cm.logger = zap.NewExample()
 
 		var received bool
-		unsub := cm.Subscribe("test.key", func(_ string) {
+		unsub := cm.Subscribe("test.key", func(_, _ string, _ any) {
 			received = true
 		})
 
@@ -807,7 +834,7 @@ func TestConfigManager_DeleteNotifiesWatchers(t *testing.T) {
 	oldValue, _, _ := cm.Get("test.key")
 
 	// Subscribe to changes
-	unsub := cm.Subscribe("test.key", func(key string) {
+	unsub := cm.Subscribe("test.key", func(pattern, key string, value any) {
 		callbackCalled = true
 		callbackKey = key
 		callbackOldValue = oldValue
@@ -983,7 +1010,7 @@ func TestConfigManager_RegisterAndLoadSource(t *testing.T) {
 	// Test watching by updating the source
 	updateChan := make(chan struct{})
 	var once sync.Once
-	cm.Subscribe("runtime.key", func(_ string) {
+	cm.Subscribe("runtime.key", func(_, _ string, _ any) {
 		once.Do(func() {
 			close(updateChan)
 		})
@@ -1016,20 +1043,68 @@ func (i *invalidSource) Watch(ctx context.Context, cm Manager, cb source.WatchOn
 	return nil
 }
 
+func TestConfigManager_handleConfigChanges_MultipleKeys(t *testing.T) {
+	cm := newTestManager()
+
+	// Create memory source with test data
+	memSource := source.NewMemoryConfigSource(map[string]any{
+		"key1": "value1",
+		"key2": "value2",
+	})
+
+	// First register the source
+	cm.RegisterSource(memSource)
+	// Then register the namespace
+	cm.RegisterNamespace("test.ns", memSource)
+
+	// Load initial config
+	err := cm.LoadNamespace("test.ns")
+	assert.NoError(t, err)
+
+	// Track received changes
+	var receivedChanges []string
+	var mu sync.Mutex
+
+	// Set up watch callback
+	unsub := cm.Subscribe("test.ns.*", func(pattern, key string, value any) {
+		mu.Lock()
+		defer mu.Unlock()
+		receivedChanges = append(receivedChanges, key)
+	})
+	defer unsub()
+
+	// Simulate multiple changes from source
+	memSource.Set("key1", "updated1")
+	memSource.Set("key2", "updated2")
+
+	// Wait for both changes to be received
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(receivedChanges) == 2
+	}, 1*time.Second, 100*time.Millisecond)
+
+	// Verify both keys were notified
+	assert.Contains(t, receivedChanges, "test.ns.key1")
+	assert.Contains(t, receivedChanges, "test.ns.key2")
+}
+
 func TestConfigManager_NamespaceKeyHandling(t *testing.T) {
 	// Create a namespace that matches exactly one of our test keys
 	ns := "plugin.test_plugin.protocol"
 	memSource := source.NewMemoryConfigSource(map[string]any{
-		ns:          "http",
+		"protocol":  "http", // Note: key is relative to namespace
 		"other.key": "value",
 	})
 
-	cm, err := NewConfigManager([]source.ConfigSource{memSource})
+	cm, err := NewConfigManager([]source.ConfigSource{})
 	require.NoError(t, err)
 
-	// Register the namespace
+	// Register the source first
+	cm.RegisterSource(memSource)
+	// Then register the namespace
 	cm.RegisterNamespace(ns, memSource)
-	require.NoError(t, cm.Load())
+	require.NoError(t, cm.LoadNamespace(ns))
 
 	tests := []struct {
 		name        string
@@ -1041,7 +1116,12 @@ func TestConfigManager_NamespaceKeyHandling(t *testing.T) {
 		{
 			name:      "exact namespace match",
 			key:       ns,
-			wantValue: "http",
+			wantValue: map[string]interface{}{
+				"protocol": "http",
+				"other": map[string]interface{}{
+					"key": "value",
+				},
+			},
 		},
 		{
 			name:        "nested key under namespace",
@@ -1062,9 +1142,10 @@ func TestConfigManager_NamespaceKeyHandling(t *testing.T) {
 			errContains: "not found",
 		},
 		{
-			name:      "non-namespaced key",
-			key:       "other.key",
-			wantValue: "value",
+			name:        "non-namespaced key",
+			key:         "other.key",
+			wantErr:     true,
+			errContains: "not found",
 		},
 	}
 
@@ -1083,6 +1164,220 @@ func TestConfigManager_NamespaceKeyHandling(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConfigManager_NamespaceRegistration(t *testing.T) {
+	t.Run("basic namespace registration", func(t *testing.T) {
+		cm := newTestManager()
+
+		// Register source with namespace
+		memSource := source.NewMemoryConfigSource(map[string]any{
+			"key1": "value1",
+		})
+		cm.RegisterSource(memSource) // First register the source
+		cm.RegisterNamespace("test.ns", memSource) // Then register namespace
+
+		// Load should apply namespace
+		err := cm.Load()
+		assert.NoError(t, err)
+
+		// Verify namespace applied
+		val, _, err := cm.Get("test.ns.key1")
+		assert.NoError(t, err)
+		assert.Equal(t, "value1", val)
+
+		// Verify source is properly registered
+		nsSources := cm.RegisteredNamespaces()
+		assert.Contains(t, nsSources, "test.ns")
+		assert.Equal(t, memSource, nsSources["test.ns"])
+	})
+
+	t.Run("multiple namespaces", func(t *testing.T) {
+		cm := newTestManager()
+
+		src1 := source.NewMemoryConfigSource(map[string]any{"key": "value1"})
+		src2 := source.NewMemoryConfigSource(map[string]any{"key": "value2"})
+
+		cm.RegisterSource(src1) // Register sources first
+		cm.RegisterSource(src2)
+		cm.RegisterNamespace("ns1", src1)
+		cm.RegisterNamespace("ns2", src2)
+
+		err := cm.Load()
+		assert.NoError(t, err)
+
+		// Verify both namespaces loaded correctly
+		val1, _, err := cm.Get("ns1.key")
+		assert.NoError(t, err)
+		assert.Equal(t, "value1", val1)
+
+		val2, _, err := cm.Get("ns2.key")
+		assert.NoError(t, err)
+		assert.Equal(t, "value2", val2)
+
+		// Verify both sources registered
+		nsSources := cm.RegisteredNamespaces()
+		assert.Contains(t, nsSources, "ns1")
+		assert.Contains(t, nsSources, "ns2")
+	})
+
+	t.Run("duplicate namespace registration", func(t *testing.T) {
+		cm := newTestManager()
+
+		src1 := source.NewMemoryConfigSource(map[string]any{"key": "value1"})
+		src2 := source.NewMemoryConfigSource(map[string]any{"key": "value2"})
+
+		cm.RegisterSource(src1) // Register sources first
+		cm.RegisterSource(src2)
+		cm.RegisterNamespace("dupe", src1)
+		cm.RegisterNamespace("dupe", src2) // Should overwrite
+
+		err := cm.Load()
+		assert.NoError(t, err)
+
+		// Should use the last registered source
+		val, _, err := cm.Get("dupe.key")
+		assert.NoError(t, err)
+		assert.Equal(t, "value2", val)
+	})
+
+	t.Run("empty namespace", func(t *testing.T) {
+		cm := newTestManager()
+
+		src := source.NewMemoryConfigSource(map[string]any{"key": "value"})
+		cm.RegisterSource(src) // Register source first
+		cm.RegisterNamespace("", src) // Empty namespace
+
+		err := cm.Load()
+		assert.NoError(t, err)
+
+		// Keys should be loaded without namespace prefix
+		val, _, err := cm.Get("key")
+		assert.NoError(t, err)
+		assert.Equal(t, "value", val)
+	})
+
+	t.Run("nested namespaces", func(t *testing.T) {
+		cm := newTestManager()
+
+		src1 := source.NewMemoryConfigSource(map[string]any{"key": "value1"})
+		src2 := source.NewMemoryConfigSource(map[string]any{"key": "value2"})
+
+		cm.RegisterSource(src1) // Register sources first
+		cm.RegisterSource(src2)
+		cm.RegisterNamespace("parent.child1", src1)
+		cm.RegisterNamespace("parent.child2", src2)
+
+		err := cm.Load()
+		assert.NoError(t, err)
+
+		// Verify nested namespaces loaded correctly
+		val1, _, err := cm.Get("parent.child1.key")
+		assert.NoError(t, err)
+		assert.Equal(t, "value1", val1)
+
+		val2, _, err := cm.Get("parent.child2.key")
+		assert.NoError(t, err)
+		assert.Equal(t, "value2", val2)
+
+		// Verify parent namespace isn't registered as a source
+		nsSources := cm.RegisteredNamespaces()
+		assert.NotContains(t, nsSources, "parent")
+		assert.Contains(t, nsSources, "parent.child1")
+		assert.Contains(t, nsSources, "parent.child2")
+	})
+}
+
+func TestConfigManager_UnregisterNamespace(t *testing.T) {
+	cm := newTestManager()
+
+	memSource := source.NewMemoryConfigSource(map[string]any{"key": "value"})
+
+	// First register the source with the manager
+	cm.RegisterSource(memSource)
+	// Then register the namespace
+	cm.RegisterNamespace("test.ns", memSource)
+
+	// Load and verify
+	err := cm.Load()
+	assert.NoError(t, err)
+	assert.True(t, cm.Exists("test.ns.key"))
+
+	// Unregister
+	err = cm.UnregisterNamespace("test.ns")
+	assert.NoError(t, err)
+
+	// Verify keys removed
+	assert.False(t, cm.Exists("test.ns.key"))
+	assert.NotContains(t, cm.RegisteredNamespaces(), "test.ns")
+
+	// Verify source was not removed from sources list
+	assert.True(t, lo.ContainsBy(cm.sources, func(s source.ConfigSource) bool {
+		return s == memSource
+	}))
+}
+
+func TestConfigManager_LoadNamespace(t *testing.T) {
+	cm := newTestManager()
+
+	src1 := source.NewMemoryConfigSource(map[string]any{"key": "value1"})
+	src2 := source.NewMemoryConfigSource(map[string]any{"key": "value2"})
+
+	cm.RegisterNamespace("ns1", src1)
+	cm.RegisterNamespace("ns2", src2)
+
+	// Load just one namespace
+	err := cm.LoadNamespace("ns1")
+	assert.NoError(t, err)
+
+	// Verify only ns1 loaded
+	assert.True(t, cm.Exists("ns1.key"))
+	assert.False(t, cm.Exists("ns2.key"))
+
+	// Now load the other namespace
+	err = cm.LoadNamespace("ns2")
+	assert.NoError(t, err)
+	assert.True(t, cm.Exists("ns2.key"))
+}
+
+func TestConfigManager_loadSource_WithNamespace(t *testing.T) {
+	cm := newTestManager()
+
+	// Register a source with namespace
+	memSource := source.NewMemoryConfigSource(map[string]any{
+		"key1": "value1",
+		"key2": "value2",
+	})
+	cm.RegisterNamespace("test.ns", memSource)
+
+	err := cm.loadSource(memSource)
+	assert.NoError(t, err)
+
+	// Verify keys are namespaced
+	val, _, err := cm.Get("test.ns.key1")
+	assert.NoError(t, err)
+	assert.Equal(t, "value1", val)
+
+	val, _, err = cm.Get("test.ns.key2")
+	assert.NoError(t, err)
+	assert.Equal(t, "value2", val)
+}
+
+func TestConfigManager_loadSource_NoNamespace(t *testing.T) {
+	cm := newTestManager()
+
+	// Source without namespace
+	memSource := source.NewMemoryConfigSource(map[string]any{
+		"key1": "value1",
+	})
+
+	err := cm.loadSource(memSource)
+	assert.NoError(t, err)
+
+	// Verify keys are not namespaced
+	val, _, err := cm.Get("key1")
+	assert.NoError(t, err)
+	assert.Equal(t, "value1", val)
 }
 
 func TestConfigManager_ValidationControl(t *testing.T) {
