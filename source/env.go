@@ -26,7 +26,7 @@ func (e *EnvConfigSource) IsGlobal() bool {
 // The delimiter is used to split nested keys (e.g. "_" for "APP_DB_HOST").
 type EnvConfigOption func(*EnvConfigSource)
 
-func WithEnvGlobal() EnvConfigOption {
+func WithEnvSourceGlobal() EnvConfigOption {
 	return func(e *EnvConfigSource) {
 		e.global = true
 	}
