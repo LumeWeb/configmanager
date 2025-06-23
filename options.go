@@ -1,10 +1,8 @@
 package configmanager
 
 import (
-	"fmt"
 	"go.lumeweb.com/configmanager/source"
 	"go.uber.org/zap"
-	"reflect"
 )
 
 type ConfigOption func(*ConfigManagerDefault) error
