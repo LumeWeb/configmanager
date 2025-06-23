@@ -191,7 +191,7 @@ func (d *DefaultConfigSource) processNestedStructs(ctx context.Context, cm confi
 		}
 
 		if field.Type.Kind() == reflect.Struct {
-			nestedDefaults := d.getNestedDefaults(field.Name, defaults)
+			nestedDefaults := d.getNestedDefaults(field)
 			if err := d.processStructDefaults(ctx, cm, fullKey, field.Type, nestedDefaults); err != nil {
 				return err
 			}
@@ -218,15 +218,12 @@ func (d *DefaultConfigSource) getFieldName(field reflect.StructField) string {
 	return field.Name
 }
 
-// getNestedDefaults extracts nested defaults for a struct field
-func (d *DefaultConfigSource) getNestedDefaults(fieldName string, defaults map[string]any) map[string]any {
-	nestedDefaults := make(map[string]any)
-	if defValue, exists := defaults[fieldName]; exists {
-		if nd, ok := defValue.(map[string]any); ok {
-			nestedDefaults = nd
-		}
+// getNestedDefaults gets defaults for a nested struct field, checking for ConfigDefaults implementation
+func (d *DefaultConfigSource) getNestedDefaults(field reflect.StructField) map[string]any {
+	if defaults, found := d.findConfigDefaults(field.Type); found {
+		return defaults.Defaults()
 	}
-	return nestedDefaults
+	return make(map[string]any)
 }
 
 // findMatchingField finds a struct field matching the given name
