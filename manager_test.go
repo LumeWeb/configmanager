@@ -1087,7 +1087,7 @@ func TestConfigManager_NamespaceKeyHandling(t *testing.T) {
 
 func TestConfigManager_ValidationControl(t *testing.T) {
 	cm := newTestManager()
-	
+
 	// Register a struct that requires validation
 	err := cm.RegisterStruct("test.validation", testStruct{})
 	require.NoError(t, err)
@@ -1159,6 +1159,62 @@ func TestConfigManager_ValidateRegisteredStructs(t *testing.T) {
 
 	err = cm.ValidateRegisteredStructs()
 	assert.NoError(t, err)
+}
+
+type rootConfig struct {
+	AppName string `config:"app_name"`
+	Debug   bool   `config:"debug"`
+}
+
+func TestConfigManager_Root(t *testing.T) {
+	cm := newTestManager()
+	err := cm.RegisterStruct("", rootConfig{})
+	require.NoError(t, err)
+
+	// Set some values
+	err = cm.Set(context.Background(), "app_name", "test_app")
+	require.NoError(t, err)
+	err = cm.Set(context.Background(), "debug", true)
+	require.NoError(t, err)
+
+	// Test with target
+	var target rootConfig
+	rootCfg, err := cm.Root(&target)
+	require.NoError(t, err)
+	assert.Equal(t, "test_app", target.AppName)
+	assert.Equal(t, true, target.Debug)
+	assert.Equal(t, &target, rootCfg)
+
+	// Test without target
+	rootCfg, err = cm.Root(nil)
+	require.NoError(t, err)
+	assert.IsType(t, &rootConfig{}, rootCfg)
+	assert.Equal(t, "test_app", rootCfg.(*rootConfig).AppName)
+	assert.Equal(t, true, rootCfg.(*rootConfig).Debug)
+
+	// Test error when no root struct registered
+	cm2 := newTestManager()
+	_, err = cm2.Root(nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no root configuration struct registered")
+
+	// Test root struct decoding
+	cm3 := newTestManager()
+	err = cm3.RegisterStruct("", rootConfig{})
+	require.NoError(t, err)
+
+	// Set some values
+	err = cm3.Set(context.Background(), "app_name", "test_app")
+	require.NoError(t, err)
+	err = cm3.Set(context.Background(), "debug", true)
+	require.NoError(t, err)
+
+	// Test Root() with nil target
+	rootCfg, err = cm3.Root(nil)
+	require.NoError(t, err)
+	assert.IsType(t, &rootConfig{}, rootCfg)
+	assert.Equal(t, "test_app", rootCfg.(*rootConfig).AppName)
+	assert.Equal(t, true, rootCfg.(*rootConfig).Debug)
 }
 
 func TestConfigManager_ValidateWithZogSchema(t *testing.T) {

@@ -84,4 +84,9 @@ type Manager interface {
 
 	// Delimiter access
 	Delim() string
+
+	// Root decodes the entire configuration into the target struct.
+	// If target is nil, a new instance of the registered root struct type is created.
+	// Returns an error if no root struct is registered or if validation fails.
+	Root(target any) (any, error)
 }
