@@ -98,53 +98,93 @@ func flattenMap(m map[string]any, prefix string) map[string]any {
 // Load loads the default configuration values into the config manager.
 func (d *DefaultConfigSource) Load(ctx context.Context, cm configManager) error {
 	// First load defaults from registered structs that implement ConfigDefaults
-	for key, typ := range d.manager.GetRegisteredStructs() {
-		if ireflect.ImplementsConfigDefaults(typ) {
-			// Create new instance of the struct
-			instance := reflect.New(typ).Interface()
-
-			// Get defaults from the struct
-			if defaults, ok := instance.(ConfigDefaults); ok {
-				for defKey, defValue := range defaults.Defaults() {
-					// Find field with matching name (case sensitive)
-					var fieldName string
-					found := false
-					for i := 0; i < typ.NumField(); i++ {
-						field := typ.Field(i)
-						// Skip unexported fields
-						if field.PkgPath != "" {
-							continue
-						}
-						if field.Name == defKey {
-							// Use tag if present, otherwise use field name
-							if tag := field.Tag.Get(d.tagName); tag != "" {
-								fieldName = tag
-							} else {
-								fieldName = field.Name
-							}
-							found = true
-							break
-						}
-					}
-					if !found {
-						continue // Skip if no matching field found
-					}
-					fullKey := key + "." + fieldName // Use dot since we're working with flattened map keys
-					// Only set if key doesn't exist
-					if exists, _, _ := cm.Get(fullKey); exists == nil {
-						if err := cm.Set(ctx, fullKey, defValue); err != nil {
-							return fmt.Errorf("failed to set default value for key %s: %w", fullKey, err)
-						}
-					}
-				}
-			}
-		}
+	if err := d.loadStructDefaults(ctx, cm); err != nil {
+		return err
 	}
 
 	// Then load static defaults
+	return d.loadStaticDefaults(ctx, cm)
+}
+
+// loadStructDefaults processes all registered structs that implement ConfigDefaults
+func (d *DefaultConfigSource) loadStructDefaults(ctx context.Context, cm configManager) error {
+	for key, typ := range d.manager.GetRegisteredStructs() {
+		if !ireflect.ImplementsConfigDefaults(typ) {
+			continue
+		}
+
+		instance := reflect.New(typ).Interface()
+		defaults, ok := instance.(ConfigDefaults)
+		if !ok {
+			continue
+		}
+
+		if err := d.processStructDefaults(ctx, cm, key, typ, defaults.Defaults()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// processStructDefaults recursively processes struct fields and their defaults
+func (d *DefaultConfigSource) processStructDefaults(ctx context.Context, cm configManager, prefix string, typ reflect.Type, defaults map[string]any) error {
+	for defKey, defValue := range defaults {
+		fieldName, fieldType, found := d.findMatchingField(typ, defKey)
+		if !found {
+			continue
+		}
+
+		fullKey := prefix + "." + fieldName
+
+		// Handle nested structs recursively
+		if fieldType.Kind() == reflect.Struct {
+			nestedDefaults, ok := defValue.(map[string]any)
+			if !ok {
+				continue
+			}
+			if err := d.processStructDefaults(ctx, cm, fullKey, fieldType, nestedDefaults); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// Only set if key doesn't exist
+		if !cm.Exists(fullKey) {
+			if err := cm.Set(ctx, fullKey, defValue); err != nil {
+				return fmt.Errorf("failed to set default value for key %s: %w", fullKey, err)
+			}
+		}
+	}
+	return nil
+}
+
+// findMatchingField finds a struct field matching the given name
+func (d *DefaultConfigSource) findMatchingField(typ reflect.Type, fieldName string) (string, reflect.Type, bool) {
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		// Skip unexported fields
+		if field.PkgPath != "" {
+			continue
+		}
+
+		// Check field name match (case sensitive)
+		if field.Name == fieldName {
+			// Use tag if present, otherwise use field name
+			tagName := field.Tag.Get(d.tagName)
+			if tagName != "" {
+				return tagName, field.Type, true
+			}
+			return field.Name, field.Type, true
+		}
+	}
+	return "", nil, false
+}
+
+// loadStaticDefaults loads the static default values
+func (d *DefaultConfigSource) loadStaticDefaults(ctx context.Context, cm configManager) error {
 	for key, value := range d.defaults {
 		// Only set if key doesn't exist
-		if exists, _, _ := cm.Get(key); exists == nil {
+		if !cm.Exists(key) {
 			if err := cm.Set(ctx, key, value); err != nil {
 				return fmt.Errorf("failed to set default value for key %s: %w", key, err)
 			}
