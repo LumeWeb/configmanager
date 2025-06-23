@@ -1166,6 +1166,80 @@ func TestConfigManager_NamespaceKeyHandling(t *testing.T) {
 	}
 }
 
+func TestConfigManager_GlobalSources(t *testing.T) {
+	t.Run("global env source", func(t *testing.T) {
+		// Create global env source
+		envSrc := source.NewEnvConfigSource("TEST_", "_", source.WithEnvGlobal())
+		
+		// Create manager with the source
+		cm, err := NewConfigManager([]source.ConfigSource{envSrc})
+		require.NoError(t, err)
+
+		// Set some env vars
+		t.Setenv("TEST_DB_HOST", "localhost")
+		t.Setenv("TEST_DB_PORT", "5432")
+
+		// Load config
+		err = cm.Load()
+		require.NoError(t, err)
+
+		// Verify keys are loaded without namespace
+		assert.True(t, cm.Exists("db.host"))
+		assert.Equal(t, "localhost", cm.koanf.Get("db.host"))
+		assert.True(t, cm.Exists("db.port"))
+		assert.Equal(t, "5432", cm.koanf.Get("db.port"))
+	})
+
+	t.Run("global default source", func(t *testing.T) {
+		// Create manager first
+		cm := newTestManager()
+
+		// Create global default source
+		defaults := map[string]any{
+			"app.name": "TestApp",
+			"app.port": 8000,
+		}
+		defaultSrc := source.NewDefaultConfigSource(cm, 
+			source.WithDefaults(defaults),
+			source.WithGlobal(true))
+
+		// Register and load the source
+		cm.RegisterSource(defaultSrc)
+		err := cm.LoadSource(defaultSrc, true, false)
+		require.NoError(t, err)
+
+		// Verify keys are loaded without namespace
+		assert.True(t, cm.Exists("app.name"))
+		assert.Equal(t, "TestApp", cm.koanf.Get("app.name"))
+		assert.True(t, cm.Exists("app.port"))
+		assert.Equal(t, 8000, cm.koanf.Get("app.port"))
+	})
+
+	t.Run("non-global sources still use namespaces", func(t *testing.T) {
+		// Create non-global env source with namespace
+		envSrc := source.NewEnvConfigSource("TEST_", "_") // No WithEnvGlobal()
+		
+		// Create manager and register namespace
+		cm, err := NewConfigManager([]source.ConfigSource{envSrc})
+		require.NoError(t, err)
+		cm.RegisterNamespace("test", envSrc)
+
+		// Set some env vars
+		t.Setenv("TEST_DB_HOST", "localhost")
+		t.Setenv("TEST_DB_PORT", "5432")
+
+		// Load config
+		err = cm.Load()
+		require.NoError(t, err)
+
+		// Verify keys are loaded with namespace
+		assert.True(t, cm.Exists("test.db.host"))
+		assert.Equal(t, "localhost", cm.koanf.Get("test.db.host"))
+		assert.True(t, cm.Exists("test.db.port"))
+		assert.Equal(t, "5432", cm.koanf.Get("test.db.port"))
+	})
+}
+
 func TestConfigManager_NamespaceRegistration(t *testing.T) {
 	t.Run("basic namespace registration", func(t *testing.T) {
 		cm := newTestManager()

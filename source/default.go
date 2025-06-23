@@ -17,6 +17,12 @@ type DefaultConfigSource struct {
 	defaults map[string]any
 	manager  manager
 	tagName  string
+	global   bool // Controls whether this source should be loaded globally
+}
+
+// IsGlobal implements GlobalConfigSource
+func (d *DefaultConfigSource) IsGlobal() bool {
+	return d.global
 }
 
 type manager interface {
@@ -29,6 +35,7 @@ type manager interface {
 type DefaultConfigOptions struct {
 	defaults map[string]any
 	tagName  string
+	global   bool
 }
 
 // DefaultConfigOption defines the option function type
@@ -48,12 +55,20 @@ func WithTagName(tagName string) DefaultConfigOption {
 	}
 }
 
+// WithGlobal sets whether this source should be loaded globally
+func WithGlobal(global bool) DefaultConfigOption {
+	return func(o *DefaultConfigOptions) {
+		o.global = global
+	}
+}
+
 // NewDefaultConfigSource creates a new DefaultConfigSource.
 // The defaults map can contain nested values using dot notation keys (e.g. "database.host").
 func NewDefaultConfigSource(manager manager, opts ...DefaultConfigOption) *DefaultConfigSource {
 	// Set defaults
 	options := DefaultConfigOptions{
 		tagName: "config",
+		global:  false, // Default to non-global behavior
 	}
 
 	// Apply options
