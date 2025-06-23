@@ -211,9 +211,13 @@ func (e *EtcdConfigSource) Watch(ctx context.Context, cm configManager, onChange
 				return
 			}
 
-			changedKeys := lo.Map(resp.Events, func(ev *clientv3.Event, _ int) string {
+			changedKeys := lo.Uniq(lo.Map(resp.Events, func(ev *clientv3.Event, _ int) string {
 				key := strings.TrimPrefix(string(ev.Kv.Key), e.prefix)
-				return strings.TrimPrefix(key, "/")
+				key = strings.TrimPrefix(key, "/")
+				return key
+			}))
+			changedKeys = lo.Filter(changedKeys, func(key string, _ int) bool {
+				return key != ""
 			})
 
 			if len(changedKeys) > 0 {

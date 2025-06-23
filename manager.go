@@ -6,7 +6,7 @@ import (
 	"github.com/Oudwins/zog"
 	_ "github.com/Oudwins/zog"
 	"github.com/go-viper/mapstructure/v2"
-	"github.com/knadh/koanf/v2"
+	kkoanf "github.com/knadh/koanf/v2"
 	"github.com/samber/lo"
 	"github.com/spf13/cast"
 	ireflect "go.lumeweb.com/configmanager/internal/reflect"
@@ -25,10 +25,34 @@ const (
 	keySeparator             = "."
 )
 
+// copy creates a throwaway copy of the ConfigManagerDefault with a new Koanf instance.
+func (cm *ConfigManagerDefault) copy() *ConfigManagerDefault {
+	cm.validationLock.RLock()
+	defer cm.validationLock.RUnlock()
+	cm.configStructLock.RLock()
+	defer cm.configStructLock.RUnlock()
+
+	return &ConfigManagerDefault{
+		koanf:             kkoanf.New(cm.Delim()),
+		sources:           cm.sources,
+		logger:            cm.logger,
+		events:            cm.events,
+		flagManager:       cm.flagManager,
+		configStructs:     cm.configStructs,
+		configFile:        cm.configFile,
+		configDir:         cm.configDir,
+		tagName:           cm.tagName,
+		registry:          cm.registry,
+		syncConfigNS:      cm.syncConfigNS,
+		validationEnabled: cm.validationEnabled,
+		delimiter:         cm.delimiter,
+	}
+}
+
 // ConfigManagerDefault is the central point of interaction for accessing and managing configuration.
 type ConfigManagerDefault struct {
 	syncMgr           csync.Manager
-	koanf             *koanf.Koanf
+	koanf             *kkoanf.Koanf
 	sources           []source.ConfigSource
 	logger            *zap.Logger
 	validationEnabled bool
@@ -64,7 +88,10 @@ func (cm *ConfigManagerDefault) Subscribe(pattern string, callback SubscriptionC
 			zap.String("pattern", pattern),
 			zap.String("event_key", e.Name()))
 
-		callback(pattern)
+		configEvent := e.Data()
+		callback(pattern,
+			configEvent.Get("key").(string),
+			configEvent.Get("value"))
 		return nil
 	})
 
@@ -87,29 +114,67 @@ func (cm *ConfigManagerDefault) reloadConfig(ctx context.Context, source source.
 	return nil
 }
 
-func (cm *ConfigManagerDefault) handleConfigChanges(_source source.ConfigSource, changedKeys []string) {
+func (cm *ConfigManagerDefault) handleConfigChanges(src source.ConfigSource, changedKeys []string) {
 	if len(changedKeys) == 0 {
-		// No changes detected, nothing to do
 		return
 	}
 
+	namespace, _ := cm.registry.GetNamespace(src)
+
 	if len(changedKeys) == 1 && changedKeys[0] == source.WatchAllChanges {
-		// All config may have changed, reload the entire source
-		if err := _source.Load(context.Background(), cm); err != nil {
-			cm.logger.Error("Failed to reload configuration from source",
-				zap.String("source", fmt.Sprintf("%T", _source)),
+		// Reload entire source
+		if err := cm.loadSource(src); err != nil {
+			cm.logger.Error("failed to reload configuration from source",
+				zap.String("source", fmt.Sprintf("%T", src)),
 				zap.Error(err))
 		}
 		return
 	}
 
-	// Selectively reload for specific keys (notification happens in reloadKey)
-	for _, key := range changedKeys {
-		if err := cm.reloadKey(context.Background(), _source, key); err != nil {
-			cm.logger.Error("Failed to reload configuration key",
+	// Apply namespace to changed keys
+	var prefixedKeys []string
+	if namespace != "" {
+		prefixedKeys = make([]string, len(changedKeys))
+		for i, key := range changedKeys {
+			prefixedKeys[i] = namespace + cm.Delim() + key
+		}
+	} else {
+		prefixedKeys = changedKeys
+	}
+
+	// Track old values and prepare updates
+	updates := make(map[string]any)
+	oldValues := make(map[string]any)
+
+	for _, key := range prefixedKeys {
+		// Get current value before reloading
+		if cm.Exists(key) {
+			oldValues[key] = cm.koanf.Get(key)
+		}
+
+		// Reload just this key from source
+		val, err := cm.getKeyFromSource(context.Background(), src, key)
+		if err != nil {
+			cm.logger.Error("failed to get new value for key",
 				zap.String("config_key", key),
-				zap.String("source", fmt.Sprintf("%T", _source)),
+				zap.String("source", fmt.Sprintf("%T", src)),
 				zap.Error(err))
+			continue
+		}
+		updates[key] = val
+	}
+
+	if len(updates) > 0 {
+		if err := cm.BulkSetAtomic(context.Background(), updates); err != nil {
+			cm.logger.Error("failed to apply config updates",
+				zap.String("source", fmt.Sprintf("%T", src)),
+				zap.Error(err))
+			return
+		}
+
+		// Notify subscribers for each changed key
+		for key, newValue := range updates {
+			cm.notifySubscribers(key, oldValues[key], newValue)
 		}
 	}
 }
@@ -154,7 +219,9 @@ func (cm *ConfigManagerDefault) getKeyFromSource(ctx context.Context, source sou
 
 func (cm *ConfigManagerDefault) notifySubscribers(key string, oldValue any, newValue any) {
 	cm.logger.Debug("Config changed",
-		zap.String("key", key))
+		zap.String("key", key),
+		zap.Any("new_value", newValue),
+		zap.Any("old_value", oldValue))
 
 	// Fire one event for the full key path
 	// The event manager will handle pattern matching via matchNodePath
@@ -170,7 +237,7 @@ func (cm *ConfigManagerDefault) notifySubscribers(key string, oldValue any, newV
 func WithDelimiter(delimiter string) ConfigOption {
 	return func(cm *ConfigManagerDefault) error {
 		cm.delimiter = delimiter
-		cm.koanf = koanf.New(delimiter)
+		cm.koanf = kkoanf.New(delimiter)
 		return nil
 	}
 }
@@ -203,7 +270,7 @@ func (cm *ConfigManagerDefault) ValidationEnabled() bool {
 // - []source.ConfigSource slice
 func NewConfigManager(sources any, opts ...ConfigOption) (*ConfigManagerDefault, error) {
 	// Create with default delimiter first
-	k := koanf.New(".")
+	k := kkoanf.New(".")
 	eventMgr := event.NewManager[csync.ConfigEvent]("", event.UsePathMode)
 
 	// Convert sources to ConfigSource interfaces
@@ -287,6 +354,41 @@ func (cm *ConfigManagerDefault) SetupSync(opts ...ConfigOption) error {
 	return nil
 }
 
+func (cm *ConfigManagerDefault) loadSource(src source.ConfigSource) error {
+	var namespace string
+	if ns, ok := cm.registry.GetNamespace(src); ok {
+		namespace = ns
+	}
+
+	// Create throwaway copy
+	throwawayCM := cm.copy()
+
+	// Load into throwaway copy
+	if err := src.Load(context.Background(), throwawayCM); err != nil {
+		return fmt.Errorf("failed to load from source: %w", err)
+	}
+
+	// Prepare updates with namespace
+	updates := make(map[string]any)
+	sourceData := throwawayCM.All()
+
+	if namespace != "" {
+		for key, value := range sourceData {
+			fullKey := namespace + cm.Delim() + key
+			updates[fullKey] = value
+		}
+	} else {
+		updates = sourceData
+	}
+
+	// Apply updates atomically
+	if err := cm.BulkSetAtomic(context.Background(), updates); err != nil {
+		return fmt.Errorf("failed to apply updates: %w", err)
+	}
+
+	return nil
+}
+
 // Load loads the initial configuration from the configured sources.
 func (cm *ConfigManagerDefault) Load() error {
 	// Disable validation during initial load to avoid validation errors
@@ -294,17 +396,17 @@ func (cm *ConfigManagerDefault) Load() error {
 	cm.DisableValidation()
 	defer cm.EnableValidation()
 
-	for _, _source := range cm.sources {
-		if err := _source.Load(context.Background(), cm); err != nil {
-			return fmt.Errorf("failed to load config from source: %w", err)
+	for _, src := range cm.sources {
+		if err := cm.loadSource(src); err != nil {
+			return fmt.Errorf("failed to load config from source %T: %w", src, err)
 		}
 
-		// Start watching for changes if the source supports it
-		if err := _source.Watch(context.Background(), cm, func(changedKeys []string, err error) {
-			cm.handleConfigChanges(_source, changedKeys)
+		// Start watching if supported
+		if err := src.Watch(context.Background(), cm, func(changedKeys []string, err error) {
+			cm.handleConfigChanges(src, changedKeys)
 		}); err != nil {
 			cm.logger.Warn("failed to start config watcher",
-				zap.String("source", fmt.Sprintf("%T", _source)),
+				zap.String("source", fmt.Sprintf("%T", src)),
 				zap.Error(err))
 		}
 	}
@@ -608,8 +710,21 @@ func (cm *ConfigManagerDefault) bulkSetAtomicInternal(ctx context.Context, updat
 		}
 	}
 
-	// Notify changes
-	cm.notifyUpdates(updates, oldValues)
+	// Deduplicate notifications by only notifying for keys that actually changed
+	finalUpdates := make(map[string]any)
+	finalOldValues := make(map[string]any)
+
+	for key, newVal := range updates {
+		oldVal := oldValues[key]
+		if !reflect.DeepEqual(oldVal, newVal) {
+			finalUpdates[key] = newVal
+			finalOldValues[key] = oldVal
+		}
+	}
+
+	if len(finalUpdates) > 0 {
+		cm.notifyUpdates(finalUpdates, finalOldValues)
+	}
 
 	// Sync changes if needed
 	for key, value := range updates {
@@ -1123,6 +1238,17 @@ func (cm *ConfigManagerDefault) RegisterNamespace(namespace string, src source.C
 	cm.registry.Register(namespace, src)
 }
 
+// RegisteredNamespaces returns a map of all registered namespaces and their associated sources.
+func (cm *ConfigManagerDefault) RegisteredNamespaces() map[string]source.ConfigSource {
+	namespaces := make(map[string]source.ConfigSource)
+	for _, ns := range cm.registry.ListNamespaces() {
+		if src, ok := cm.registry.GetSource(ns); ok {
+			namespaces[ns] = src
+		}
+	}
+	return namespaces
+}
+
 // RegisterSource adds a new configuration source at runtime without loading/watching it
 func (cm *ConfigManagerDefault) RegisterSource(src source.ConfigSource) {
 	// Check if source is already registered
@@ -1203,9 +1329,25 @@ func (cm *ConfigManagerDefault) LoadNamespace(namespace string) error {
 		return fmt.Errorf("namespace %s not registered", namespace)
 	}
 
-	// Load the source through config manager
-	if err := src.Load(context.Background(), cm); err != nil {
-		return fmt.Errorf("failed to load namespace %s: %w", namespace, err)
+	// Create throwaway config manager to load source data
+	throwawayCM := cm.copy()
+
+	// Load into throwaway copy
+	if err := src.Load(context.Background(), throwawayCM); err != nil {
+		return fmt.Errorf("failed to load from source: %w", err)
+	}
+
+	// Apply updates with namespace prefix and track changed keys
+	allData := throwawayCM.All()
+	updates := lo.Reduce(lo.Keys(allData), func(agg map[string]any, key string, _ int) map[string]any {
+		fullKey := namespace + cm.Delim() + key
+		agg[fullKey] = allData[key]
+		return agg
+	}, make(map[string]any))
+
+	// Apply updates atomically
+	if err := cm.BulkSetAtomic(context.Background(), updates); err != nil {
+		return fmt.Errorf("failed to apply namespace updates: %w", err)
 	}
 
 	// Register the source for watching

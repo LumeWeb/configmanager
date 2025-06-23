@@ -191,6 +191,16 @@ func (d *DefaultConfigSource) processNestedStructs(ctx context.Context, cm confi
 		}
 
 		if field.Type.Kind() == reflect.Struct {
+			// First check if we have explicit defaults for this nested struct
+			if nestedDefaults, ok := defaults[field.Name]; ok {
+				if nestedMap, ok := nestedDefaults.(map[string]any); ok {
+					if err := d.processStructDefaults(ctx, cm, fullKey, field.Type, nestedMap); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+			// Fall back to defaults from ConfigDefaults implementation
 			nestedDefaults := d.getNestedDefaults(field)
 			if err := d.processStructDefaults(ctx, cm, fullKey, field.Type, nestedDefaults); err != nil {
 				return err

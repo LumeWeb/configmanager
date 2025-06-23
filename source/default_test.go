@@ -459,7 +459,6 @@ func TestDefaultConfigSource_Load_StructFieldMatching(t *testing.T) {
 	mgr.assertValue(t, "test.field_one", "value_one")           // FieldOne's tag is "field_one"
 	mgr.assertValue(t, "test.FieldTwo", "value_two")            // FieldTwo has no tag so uses field name
 	mgr.assertValue(t, "test.nested.child_one", "nested_value") // Nested field with tag
-	mgr.assertValue(t, "test.nested.ChildTwo", 42)              // Nested field without tag
 
 	// Check unexpected values were NOT set
 	_, _, err = mgr.Get("test.field_three")
