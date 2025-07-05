@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/knadh/koanf/providers/env"
+	"github.com/knadh/koanf/providers/env/v2"
 	"github.com/knadh/koanf/v2"
 )
 
@@ -53,22 +53,25 @@ func (e *EnvConfigSource) Load(ctx context.Context, cm configManager) error {
 	tmpKoanf := koanf.New(cm.Delim())
 
 	// Create a callback that transforms env var names to config keys
-	cb := func(s string) string {
+	cb := func(k, v string) (string, any) {
 		// Remove prefix if specified
 		if e.prefix != "" {
-			s = strings.TrimPrefix(s, e.prefix)
+			k = strings.TrimPrefix(k, e.prefix)
 		}
 
 		// Convert to lowercase and replace delimiter with koanf's delimiter
-		s = strings.ToLower(s)
+		k = strings.ToLower(k)
 		if e.delimiter != "" {
-			s = strings.ReplaceAll(s, e.delimiter, tmpKoanf.Delim())
+			k = strings.ReplaceAll(k, e.delimiter, tmpKoanf.Delim())
 		}
-		return s
+		return k, v
 	}
 
 	// Use the env provider with our callback
-	provider := env.Provider(e.prefix, tmpKoanf.Delim(), cb)
+	provider := env.Provider(tmpKoanf.Delim(), env.Opt{
+		Prefix:        e.prefix,
+		TransformFunc: cb,
+	})
 	if err := tmpKoanf.Load(provider, nil); err != nil {
 		return err
 	}

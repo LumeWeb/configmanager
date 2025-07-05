@@ -11,7 +11,7 @@ import (
 	"github.com/knadh/koanf/maps"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	_ "go.etcd.io/etcd/client/v3/mock/mockserver"
-	config "go.lumeweb.com/configmanager/config"
+	"go.lumeweb.com/configmanager/config"
 	"go.lumeweb.com/configmanager/internal/etcd"
 	"go.uber.org/zap"
 )
