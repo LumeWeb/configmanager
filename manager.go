@@ -1335,25 +1335,9 @@ func (cm *ConfigManagerDefault) LoadNamespace(namespace string) error {
 		return fmt.Errorf("namespace %s not registered", namespace)
 	}
 
-	// Create throwaway config manager to load source data
-	throwawayCM := cm.copy()
-
-	// Load into throwaway copy
-	if err := src.Load(context.Background(), throwawayCM); err != nil {
-		return fmt.Errorf("failed to load from source: %w", err)
-	}
-
-	// Apply updates with namespace prefix and track changed keys
-	allData := throwawayCM.All()
-	updates := lo.Reduce(lo.Keys(allData), func(agg map[string]any, key string, _ int) map[string]any {
-		fullKey := namespace + cm.Delim() + key
-		agg[fullKey] = allData[key]
-		return agg
-	}, make(map[string]any))
-
-	// Apply updates atomically
-	if err := cm.BulkSetAtomic(context.Background(), updates); err != nil {
-		return fmt.Errorf("failed to apply namespace updates: %w", err)
+	// Delegate to loadSource which handles both global and namespaced loading
+	if err := cm.loadSource(src); err != nil {
+		return fmt.Errorf("failed to load namespace %s: %w", namespace, err)
 	}
 
 	// Register the source for watching
