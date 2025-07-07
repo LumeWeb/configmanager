@@ -15,10 +15,10 @@ func setupDefaultConfigTest(t *testing.T, defaults map[string]any, tagName strin
 	mgr := newMockManager()
 	var opts []DefaultConfigOption
 	if defaults != nil {
-		opts = append(opts, WithDefaults(defaults))
+		opts = append(opts, WithDefaultSourceDefaults(defaults))
 	}
 	if tagName != "" {
-		opts = append(opts, WithTagName(tagName))
+		opts = append(opts, WithDefaultSourceTagName(tagName))
 	}
 	return mgr, NewDefaultConfigSource(mgr, opts...)
 }
@@ -227,13 +227,13 @@ func (m *mockManager) assertValue(t *testing.T, key string, expected any) {
 	}
 }
 
-// testConfigWithDefaults implements ConfigDefaults
-type testConfigWithDefaults struct {
+// testConfigWithDefaultSourceDefaults implements ConfigDefaults
+type testConfigWithDefaultSourceDefaults struct {
 	Host string `config:"host"`
 	Port int    `config:"port"`
 }
 
-func (t *testConfigWithDefaults) Defaults() map[string]any {
+func (t *testConfigWithDefaultSourceDefaults) Defaults() map[string]any {
 	return map[string]any{
 		"Host": "default_host",
 		"Port": 8080,
@@ -262,7 +262,7 @@ func TestNewDefaultConfigSource(t *testing.T) {
 	})
 
 	t.Run("empty defaults", func(t *testing.T) {
-		dcs := NewDefaultConfigSource(mgr, WithDefaults(map[string]any{}))
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceDefaults(map[string]any{}))
 		assert.NotNil(t, dcs)
 		assert.Empty(t, dcs.defaults)
 	})
@@ -272,7 +272,7 @@ func TestNewDefaultConfigSource(t *testing.T) {
 			"key1": "value1",
 			"key2": 123,
 		}
-		dcs := NewDefaultConfigSource(mgr, WithDefaults(defaults), WithTagName("config"))
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceDefaults(defaults), WithDefaultSourceTagName("config"))
 		assert.NotNil(t, dcs)
 		assert.Equal(t, defaults, dcs.defaults)
 	})
@@ -290,7 +290,7 @@ func TestNewDefaultConfigSource(t *testing.T) {
 			"parent.child2": true,
 			"key1":          123,
 		}
-		dcs := NewDefaultConfigSource(mgr, WithDefaults(defaults))
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceDefaults(defaults))
 		assert.NotNil(t, dcs)
 		assert.Equal(t, expectedFlatDefaults, dcs.defaults)
 	})
@@ -315,7 +315,7 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 
 	t.Run("load struct defaults", func(t *testing.T) {
 		mgr, dcs := setupDefaultConfigTest(t, nil, "config")
-		err := mgr.RegisterStruct("db", testConfigWithDefaults{})
+		err := mgr.RegisterStruct("db", testConfigWithDefaultSourceDefaults{})
 		assert.NoError(t, err)
 
 		err = dcs.Load(ctx, mgr)
@@ -362,7 +362,7 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 
 	t.Run("struct defaults do not overwrite existing values", func(t *testing.T) {
 		mgr, dcs := setupDefaultConfigTest(t, nil, "")
-		err := mgr.RegisterStruct("db", testConfigWithDefaults{})
+		err := mgr.RegisterStruct("db", testConfigWithDefaultSourceDefaults{})
 		assert.NoError(t, err)
 		err = mgr.Set(context.Background(), "db.host", "existing_db_host")
 		assert.NoError(t, err)
@@ -376,7 +376,7 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 
 	t.Run("load both static and struct defaults", func(t *testing.T) {
 		mgr, dcs := setupDefaultConfigTest(t, map[string]any{"app.name": "TestApp"}, "")
-		err := mgr.RegisterStruct("db", testConfigWithDefaults{})
+		err := mgr.RegisterStruct("db", testConfigWithDefaultSourceDefaults{})
 		assert.NoError(t, err)
 
 		err = dcs.Load(ctx, mgr)
@@ -391,7 +391,7 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 
 	t.Run("order of loading: struct defaults first, then static defaults", func(t *testing.T) {
 		mgr, dcs := setupDefaultConfigTest(t, map[string]any{"conflict.host": "static_host_override"}, "")
-		err := mgr.RegisterStruct("conflict", testConfigWithDefaults{}) // Defaults Host to "default_host"
+		err := mgr.RegisterStruct("conflict", testConfigWithDefaultSourceDefaults{}) // Defaults Host to "default_host"
 		assert.NoError(t, err)
 
 		err = dcs.Load(ctx, mgr)
@@ -405,7 +405,7 @@ func TestDefaultConfigSource_Load(t *testing.T) {
 
 	t.Run("static defaults for a key not in struct defaults", func(t *testing.T) {
 		mgr, dcs := setupDefaultConfigTest(t, map[string]any{"db.user": "static_user"}, "")
-		err := mgr.RegisterStruct("db", testConfigWithDefaults{}) // Defaults host and port
+		err := mgr.RegisterStruct("db", testConfigWithDefaultSourceDefaults{}) // Defaults host and port
 		assert.NoError(t, err)
 
 		err = dcs.Load(ctx, mgr)
@@ -539,7 +539,7 @@ func TestProcessNestedStructs_AllFields(t *testing.T) {
 	}
 
 	// Register the struct with defaults
-	err := mgr.RegisterStruct("test", ParentWithDefaults{})
+	err := mgr.RegisterStruct("test", ParentWithDefaultSourceDefaults{})
 	assert.NoError(t, err)
 
 	// Load the defaults - this internally processes nested structs
@@ -630,12 +630,12 @@ type Nested struct {
 	Child string `config:"child"`
 }
 
-type ParentWithDefaults struct {
+type ParentWithDefaultSourceDefaults struct {
 	Nested1 Nested `config:"nested1"`
 	Nested2 Nested `config:"nested2"`
 }
 
-func (p *ParentWithDefaults) Defaults() map[string]any {
+func (p *ParentWithDefaultSourceDefaults) Defaults() map[string]any {
 	return map[string]any{
 		"Nested1": map[string]any{
 			"Child": "child1",

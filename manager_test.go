@@ -1114,8 +1114,8 @@ func TestConfigManager_NamespaceKeyHandling(t *testing.T) {
 		errContains string
 	}{
 		{
-			name:      "exact namespace match",
-			key:       ns,
+			name: "exact namespace match",
+			key:  ns,
 			wantValue: map[string]interface{}{
 				"protocol": "http",
 				"other": map[string]interface{}{
@@ -1169,8 +1169,8 @@ func TestConfigManager_NamespaceKeyHandling(t *testing.T) {
 func TestConfigManager_GlobalSources(t *testing.T) {
 	t.Run("global env source", func(t *testing.T) {
 		// Create global env source
-		envSrc := source.NewEnvConfigSource("TEST_", "_", source.WithEnvGlobal())
-		
+		envSrc := source.NewEnvConfigSource("TEST_", "_", source.WithEnvSourceGlobal())
+
 		// Create manager with the source
 		cm, err := NewConfigManager([]source.ConfigSource{envSrc})
 		require.NoError(t, err)
@@ -1199,9 +1199,9 @@ func TestConfigManager_GlobalSources(t *testing.T) {
 			"app.name": "TestApp",
 			"app.port": 8000,
 		}
-		defaultSrc := source.NewDefaultConfigSource(cm, 
-			source.WithDefaults(defaults),
-			source.WithGlobal(true))
+		defaultSrc := source.NewDefaultConfigSource(cm,
+			source.WithDefaultSourceDefaults(defaults),
+			source.WithDefaultSourceGlobal())
 
 		// Register and load the source
 		cm.RegisterSource(defaultSrc)
@@ -1218,7 +1218,7 @@ func TestConfigManager_GlobalSources(t *testing.T) {
 	t.Run("non-global sources still use namespaces", func(t *testing.T) {
 		// Create non-global env source with namespace
 		envSrc := source.NewEnvConfigSource("TEST_", "_") // No WithEnvGlobal()
-		
+
 		// Create manager and register namespace
 		cm, err := NewConfigManager([]source.ConfigSource{envSrc})
 		require.NoError(t, err)
@@ -1248,7 +1248,7 @@ func TestConfigManager_NamespaceRegistration(t *testing.T) {
 		memSource := source.NewMemoryConfigSource(map[string]any{
 			"key1": "value1",
 		})
-		cm.RegisterSource(memSource) // First register the source
+		cm.RegisterSource(memSource)               // First register the source
 		cm.RegisterNamespace("test.ns", memSource) // Then register namespace
 
 		// Load should apply namespace
@@ -1319,7 +1319,7 @@ func TestConfigManager_NamespaceRegistration(t *testing.T) {
 		cm := newTestManager()
 
 		src := source.NewMemoryConfigSource(map[string]any{"key": "value"})
-		cm.RegisterSource(src) // Register source first
+		cm.RegisterSource(src)        // Register source first
 		cm.RegisterNamespace("", src) // Empty namespace
 
 		err := cm.Load()
