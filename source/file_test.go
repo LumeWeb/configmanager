@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestFileSourceWrapper_Load(t *testing.T) {
+func TestFileSource_Load(t *testing.T) {
 	t.Run("load valid file", func(t *testing.T) {
 		tmpFile := createTempFile(t, "test.key: test_value\n")
 		defer func() {
@@ -19,7 +20,7 @@ func TestFileSourceWrapper_Load(t *testing.T) {
 			}
 		}()
 
-		f := NewFileSource(tmpFile).(*fileSourceWrapper)
+		f := NewFileSource(tmpFile).(*fileSource)
 		mgr := newMockManager()
 
 		err := f.Load(context.Background(), mgr)
@@ -37,7 +38,7 @@ func TestFileSourceWrapper_Load(t *testing.T) {
 			}
 		}()
 
-		f := NewFileSource(tmpFile).(*fileSourceWrapper)
+		f := NewFileSource(tmpFile).(*fileSource)
 		mgr := newMockManager()
 
 		err := f.Load(context.Background(), mgr)
@@ -48,7 +49,7 @@ func TestFileSourceWrapper_Load(t *testing.T) {
 	})
 
 	t.Run("load non-existent file", func(t *testing.T) {
-		f := NewFileSource("nonexistent.yaml").(*fileSourceWrapper)
+		f := NewFileSource("nonexistent.yaml").(*fileSource)
 		mgr := newMockManager()
 
 		err := f.Load(context.Background(), mgr)
@@ -56,7 +57,7 @@ func TestFileSourceWrapper_Load(t *testing.T) {
 	})
 }
 
-func TestFileSourceWrapper_Watch(t *testing.T) {
+func TestFileSource_Watch(t *testing.T) {
 	t.Run("detect file changes", func(t *testing.T) {
 		tmpFile := createTempFile(t, `
 test.key: initial
@@ -69,7 +70,7 @@ test.key3: initial
 			}
 		}()
 
-		f := NewFileSource(tmpFile).(*fileSourceWrapper)
+		f := NewFileSource(tmpFile).(*fileSource)
 		mgr := newMockManager()
 
 		err := f.Load(context.Background(), mgr)
@@ -116,7 +117,7 @@ test.key3: initial
 			}
 		}()
 
-		f := NewFileSource(tmpFile).(*fileSourceWrapper)
+		f := NewFileSource(tmpFile).(*fileSource)
 		mgr := newMockManager()
 
 		err := f.Load(context.Background(), mgr)
@@ -154,7 +155,7 @@ key4: v4
 			}
 		}()
 
-		f := NewFileSource(tmpFile, WithChangedThreshold(0.5)).(*fileSourceWrapper)
+		f := NewFileSource(tmpFile, WithChangedThreshold(0.5)).(*fileSource)
 		mgr := newMockManager()
 
 		err := f.Load(context.Background(), mgr)
@@ -197,7 +198,7 @@ key4: v4
 			}
 		}()
 
-		f := NewFileSource(tmpFile, WithChangedThreshold(0.5)).(*fileSourceWrapper)
+		f := NewFileSource(tmpFile, WithChangedThreshold(0.5)).(*fileSource)
 		mgr := newMockManager()
 
 		err := f.Load(context.Background(), mgr)
@@ -234,7 +235,7 @@ key4: v4
 			require.NoError(t, err)
 		}(tmpFile)
 
-		f := NewFileSource(tmpFile, WithChangedThreshold(1)).(*fileSourceWrapper)
+		f := NewFileSource(tmpFile, WithChangedThreshold(1)).(*fileSource)
 		mgr := newMockManager()
 
 		err := f.Load(context.Background(), mgr)
@@ -273,7 +274,7 @@ key2: v2
 			}
 		}()
 
-		f := NewFileSource(tmpFile, WithChangedThreshold(1)).(*fileSourceWrapper)
+		f := NewFileSource(tmpFile, WithChangedThreshold(1)).(*fileSource)
 		mgr := newMockManager()
 
 		err := f.Load(context.Background(), mgr)
@@ -306,7 +307,7 @@ key2: v2
 			}
 		}()
 
-		f := NewFileSource(tmpFile, WithChangedThreshold(0.5)).(*fileSourceWrapper)
+		f := NewFileSource(tmpFile, WithChangedThreshold(0.5)).(*fileSource)
 		mgr := newMockManager()
 
 		err := f.Load(context.Background(), mgr)
@@ -342,7 +343,7 @@ key2: v2
 			}
 		}()
 
-		f := NewFileSource(tmpFile, WithChangedThreshold(0.5)).(*fileSourceWrapper)
+		f := NewFileSource(tmpFile, WithChangedThreshold(0.5)).(*fileSource)
 		mgr := newMockManager()
 
 		err := f.Load(context.Background(), mgr)
@@ -368,8 +369,8 @@ key2: v2
 	})
 }
 
-func TestFileSourceWrapper_WithChangedThreshold(t *testing.T) {
-	f := NewFileSource("").(*fileSourceWrapper)
+func TestFileSource_WithChangedThreshold(t *testing.T) {
+	f := NewFileSource("").(*fileSource)
 	WithChangedThreshold(0.8)(f)
 	assert.Equal(t, 0.8, f.changedThreshold)
 }
@@ -385,9 +386,133 @@ func createTempFile(t *testing.T, content string) string {
 	return tmpFile.Name()
 }
 
-func stopWatcher(t *testing.T, f *fileSourceWrapper) {
+func stopWatcher(t *testing.T, f *fileSource) {
 	if stoppable, ok := any(f).(StoppableConfigSource); ok {
 		err := stoppable.Stop()
 		require.NoError(t, err)
 	}
+}
+
+func TestFileSource_Persist(t *testing.T) {
+	t.Run("persist all keys", func(t *testing.T) {
+		tmpFile := createTempFile(t, "")
+		defer os.Remove(tmpFile)
+
+		f := NewFileSource(tmpFile).(*fileSource)
+		mgr := newMockManager()
+		err := mgr.BulkSetAtomic(context.Background(), map[string]any{
+			"key1": "value1",
+			"key2": "value2",
+		})
+		require.NoError(t, err)
+
+		err = f.Persist(mgr)
+		require.NoError(t, err)
+
+		// Verify file contents
+		data, err := os.ReadFile(tmpFile)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), "key1: value1")
+		assert.Contains(t, string(data), "key2: value2")
+	})
+
+	t.Run("persist with key prefix", func(t *testing.T) {
+		tmpFile := createTempFile(t, "")
+		defer os.Remove(tmpFile)
+
+		f := NewFileSource(tmpFile).(*fileSource)
+		mgr := newMockManager()
+		err := mgr.BulkSetAtomic(context.Background(), map[string]any{
+			"prefix1.key1": "value1",
+			"prefix1.key2": "value2",
+			"prefix2.key1": "value3",
+		})
+		require.NoError(t, err)
+
+		err = f.Persist(mgr, "prefix1")
+		require.NoError(t, err)
+
+		// Verify file contents
+		data, err := os.ReadFile(tmpFile)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), "key1: value1")
+		assert.Contains(t, string(data), "key2: value2")
+		assert.NotContains(t, string(data), "prefix2.key1")
+	})
+
+	t.Run("persist with multiple prefixes - keys may overwrite", func(t *testing.T) {
+		tmpFile := createTempFile(t, "")
+		defer os.Remove(tmpFile)
+
+		f := NewFileSource(tmpFile).(*fileSource)
+		mgr := newMockManager()
+		err := mgr.BulkSetAtomic(context.Background(), map[string]any{
+			"prefix1.key1": "value1",
+			"prefix2.key1": "value2", // Same key name under different prefix
+			"prefix3.key1": "value3",
+		})
+		require.NoError(t, err)
+
+		err = f.Persist(mgr, "prefix1", "prefix2")
+		require.NoError(t, err)
+
+		// Verify file contents - note that keys may overwrite since output is flattened
+		data, err := os.ReadFile(tmpFile)
+		require.NoError(t, err)
+		// Only one of the key1 values will be present (implementation dependent)
+		assert.Contains(t, string(data), "key1:")
+		assert.NotContains(t, string(data), "prefix3.key1")
+	})
+
+	t.Run("persist empty config", func(t *testing.T) {
+		tmpFile := createTempFile(t, "")
+		defer os.Remove(tmpFile)
+
+		f := NewFileSource(tmpFile).(*fileSource)
+		mgr := newMockManager()
+
+		err := f.Persist(mgr)
+		require.NoError(t, err)
+
+		// Verify file is empty
+		data, err := os.ReadFile(tmpFile)
+		require.NoError(t, err)
+		assert.Equal(t, "{}\n", string(data))
+	})
+
+	t.Run("error creating temp file", func(t *testing.T) {
+		// Create a read-only directory
+		tmpDir, err := os.MkdirTemp("", "testdir")
+		require.NoError(t, err)
+		defer func() {
+			// Restore writable permissions before cleanup
+			os.Chmod(tmpDir, 0755)
+			os.RemoveAll(tmpDir)
+		}()
+		os.Chmod(tmpDir, 0555) // Read and execute only
+
+		f := NewFileSource(filepath.Join(tmpDir, "config.yaml")).(*fileSource)
+		mgr := newMockManager()
+		err = mgr.BulkSetAtomic(context.Background(), map[string]any{"key": "value"})
+		require.NoError(t, err)
+
+		err = f.Persist(mgr)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to create temporary file")
+	})
+
+	t.Run("error writing to temp file", func(t *testing.T) {
+		tmpFile := createTempFile(t, "")
+		defer os.Remove(tmpFile)
+
+		f := NewFileSource(tmpFile).(*fileSource)
+		mgr := newMockManager()
+		// Use a channel which can't be marshaled to YAML
+		err := mgr.BulkSetAtomic(context.Background(), map[string]any{"key": make(chan int)})
+		require.NoError(t, err)
+
+		err = f.Persist(mgr)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot persist config")
+	})
 }
