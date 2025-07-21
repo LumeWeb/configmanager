@@ -1037,18 +1037,49 @@ func (cm *ConfigManagerDefault) schemaValidate(key string, value any, schema zog
 // Persist persists the configuration by delegating to ConfigSource implementations.
 func (cm *ConfigManagerDefault) Persist(keyPrefix ...string) error {
 	var accumulatedError error
-	for _, _source := range cm.sources {
+	for _, src := range cm.sources {
 		// Check if the source is persistable
-		if ps, ok := _source.(source.PersistableConfigSource); ok {
+		if ps, ok := src.(source.PersistableConfigSource); ok {
+			// Get namespace for this source if any
+			namespace, _ := cm.registry.GetNamespace(src)
+
+			// Get all keys matching prefixes
 			keys := cm.getFilteredKeys(keyPrefix...)
 
-			persistKeys := lo.Reject(keys, func(key string, _ int) bool {
-				return cm.isVolatile(key)
+			// Filter keys:
+			// 1. Remove volatile keys
+			// 2. For namespaced sources, include keys under any of the specified prefixes
+			persistKeys := lo.Filter(keys, func(key string, _ int) bool {
+				if cm.isVolatile(key) {
+					return false
+				}
+				if len(keyPrefix) > 0 {
+					for _, prefix := range keyPrefix {
+						if strings.HasPrefix(key, prefix+cm.Delim()) {
+							return true
+						}
+					}
+					return false
+				}
+				return true
 			})
 
 			if len(persistKeys) > 0 {
-				if err := ps.Persist(cm, persistKeys...); err != nil {
-					cm.logger.Error("failed to persist config for a source", zap.Error(err))
+				// For namespaced sources, strip the namespace prefix before passing to Persist
+				var keysToPersist []string
+				if namespace != "" {
+					keysToPersist = make([]string, len(persistKeys))
+					for i, key := range persistKeys {
+						keysToPersist[i] = strings.TrimPrefix(key, namespace+cm.Delim())
+					}
+				} else {
+					keysToPersist = persistKeys
+				}
+
+				if err := ps.Persist(cm, namespace, keysToPersist...); err != nil {
+					cm.logger.Error("failed to persist config for a source",
+						zap.String("source", fmt.Sprintf("%T", src)),
+						zap.Error(err))
 					if accumulatedError == nil {
 						accumulatedError = fmt.Errorf("error persisting source: %w", err)
 					} else {
