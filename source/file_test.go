@@ -422,22 +422,28 @@ func TestFileSource_Persist(t *testing.T) {
 
 		f := NewFileSource(tmpFile).(*fileSource)
 		mgr := newMockManager()
+		// First verify the manager has the expected keys
 		err := mgr.BulkSetAtomic(context.Background(), map[string]any{
 			"prefix1.key1": "value1",
-			"prefix1.key2": "value2",
+			"prefix1.key2": "value2", 
 			"prefix2.key1": "value3",
 		})
 		require.NoError(t, err)
+		require.True(t, mgr.Exists("prefix1.key1"))
+		require.True(t, mgr.Exists("prefix1.key2"))
+		require.True(t, mgr.Exists("prefix2.key1"))
 
-		err = f.Persist(mgr, "", "prefix1")
+		// Persist specific keys with namespace "prefix1" and unqualified keys
+		err = f.Persist(mgr, "prefix1", "key1", "key2")
 		require.NoError(t, err)
 
-		// Verify file contents - should include full keys with prefixes
+		// Verify file contents contains keys without namespace prefix
 		data, err := os.ReadFile(tmpFile)
 		require.NoError(t, err)
-		assert.Contains(t, string(data), "prefix1.key1: value1")
-		assert.Contains(t, string(data), "prefix1.key2: value2")
-		assert.NotContains(t, string(data), "prefix2.key1")
+		assert.Contains(t, string(data), "key1: value1")
+		assert.Contains(t, string(data), "key2: value2")
+		assert.NotContains(t, string(data), "prefix1.key1") // Namespace should be stripped
+		assert.NotContains(t, string(data), "prefix2.key1") // Other namespace not present
 	})
 
 	t.Run("persist with multiple prefixes - keys may overwrite", func(t *testing.T) {

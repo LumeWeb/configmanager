@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync"
 
 	"github.com/knadh/koanf/parsers/yaml"
@@ -192,78 +191,64 @@ func (f *fileSource) detectChangedKeys(oldState, newState map[string]any) []stri
 }
 
 func (f *fileSource) Persist(cm configManager, namespace string, keys ...string) error {
-	// Store original keys to use for the final persisted data
-	originalKeys := keys
-	// If namespace is provided, we need to prefix the keys when getting values from manager
-	if namespace != "" {
-		prefixedKeys := make([]string, len(keys))
-		for i, key := range keys {
-			prefixedKeys[i] = namespace + cm.Delim() + key
-		}
-		keys = prefixedKeys
-	}
-	// Get all config if no keys specified
-	var configToPersist map[string]any
+	// Create a new koanf instance to collect and organize the config
+	persistKoanf := koanf.New(cm.Delim())
+
+	// Get all keys if none specified
 	if len(keys) == 0 {
-		// For full persist, strip namespace from all keys
-		allConfig := cm.All()
-		configToPersist = make(map[string]any)
-		for key, value := range allConfig {
-			if namespace != "" && strings.HasPrefix(key, namespace+cm.Delim()) {
-				key = strings.TrimPrefix(key, namespace+cm.Delim())
-			}
-			configToPersist[key] = value
-		}
-	} else {
-		configToPersist = make(map[string]any)
-		allKeys := cm.Keys()
+		keys = cm.Keys()
+	}
 
-		for i, prefix := range keys {
-			for _, key := range allKeys {
-				if strings.HasPrefix(key, prefix) {
-					if value, _, err := cm.Get(key); err == nil {
-						// Use original key without namespace for persistence
-						persistKey := originalKeys[i]
-						if strings.HasPrefix(key, prefix) {
-							suffix := strings.TrimPrefix(key, prefix)
-							persistKey += suffix
-						}
-						configToPersist[persistKey] = value
-					}
-				}
+	// Collect all key-value pairs into the koanf instance
+	for _, key := range keys {
+		// Handle namespaced keys
+		fullKey := key
+		if namespace != "" {
+			fullKey = namespace + cm.Delim() + key
+		}
+
+		if value, _, err := cm.Get(fullKey); err == nil {
+			err = persistKoanf.Set(fullKey, value)
+			if err != nil {
+				return err
 			}
 		}
 	}
 
-	// 2. Create a temporary file
+	// Get the final config to persist by cutting the namespace if needed
+	var configToPersist map[string]any
+	if namespace != "" {
+		configToPersist = persistKoanf.Cut(namespace).Raw()
+	} else {
+		configToPersist = persistKoanf.Raw()
+	}
+
+	// Create temporary file
 	tmpFile, err := os.CreateTemp(filepath.Dir(f.path), ".config_tmp_*.yaml")
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %w", err)
 	}
 	defer os.Remove(tmpFile.Name())
 
-	// 3. Write to the temporary file
+	// Write config data directly to temporary file
 	enc := yyaml.NewEncoder(tmpFile)
 	defer enc.Close()
 
-	// First check if the config contains any unsupported types
 	if err := checkForUnsupportedTypes(configToPersist); err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("cannot persist config: %w", err)
 	}
 
-	err = enc.Encode(configToPersist)
-	if err != nil {
-		// Close the file before returning error
+	if err := enc.Encode(configToPersist); err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("cannot persist config: %w", err)
 	}
 
-	if err = tmpFile.Close(); err != nil {
+	if err := tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed to close temporary file: %w", err)
 	}
 
-	// 4. Rename the temporary file
+	// Rename temporary file to final destination
 	if err := os.Rename(tmpFile.Name(), f.path); err != nil {
 		return fmt.Errorf("failed to rename temporary file: %w", err)
 	}
