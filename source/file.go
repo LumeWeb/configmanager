@@ -191,19 +191,45 @@ func (f *fileSource) detectChangedKeys(oldState, newState map[string]any) []stri
 	return changed
 }
 
-func (f *fileSource) Persist(cm configManager, keyPrefix ...string) error {
-	// 1. Filter Configuration
+func (f *fileSource) Persist(cm configManager, namespace string, keys ...string) error {
+	// Store original keys to use for the final persisted data
+	originalKeys := keys
+	// If namespace is provided, we need to prefix the keys when getting values from manager
+	if namespace != "" {
+		prefixedKeys := make([]string, len(keys))
+		for i, key := range keys {
+			prefixedKeys[i] = namespace + cm.Delim() + key
+		}
+		keys = prefixedKeys
+	}
+	// Get all config if no keys specified
 	var configToPersist map[string]any
-	if len(keyPrefix) == 0 {
-		configToPersist = cm.All()
+	if len(keys) == 0 {
+		// For full persist, strip namespace from all keys
+		allConfig := cm.All()
+		configToPersist = make(map[string]any)
+		for key, value := range allConfig {
+			if namespace != "" && strings.HasPrefix(key, namespace+cm.Delim()) {
+				key = strings.TrimPrefix(key, namespace+cm.Delim())
+			}
+			configToPersist[key] = value
+		}
 	} else {
 		configToPersist = make(map[string]any)
-		for _, prefix := range keyPrefix {
-			for key, value := range cm.All() {
+		allKeys := cm.Keys()
+
+		for i, prefix := range keys {
+			for _, key := range allKeys {
 				if strings.HasPrefix(key, prefix) {
-					// Strip the prefix and following separator from the key
-					strippedKey := strings.TrimPrefix(key, prefix+".")
-					configToPersist[strippedKey] = value
+					if value, _, err := cm.Get(key); err == nil {
+						// Use original key without namespace for persistence
+						persistKey := originalKeys[i]
+						if strings.HasPrefix(key, prefix) {
+							suffix := strings.TrimPrefix(key, prefix)
+							persistKey += suffix
+						}
+						configToPersist[persistKey] = value
+					}
 				}
 			}
 		}

@@ -406,7 +406,7 @@ func TestFileSource_Persist(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		err = f.Persist(mgr)
+		err = f.Persist(mgr, "")
 		require.NoError(t, err)
 
 		// Verify file contents
@@ -429,14 +429,14 @@ func TestFileSource_Persist(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		err = f.Persist(mgr, "prefix1")
+		err = f.Persist(mgr, "", "prefix1")
 		require.NoError(t, err)
 
-		// Verify file contents
+		// Verify file contents - should include full keys with prefixes
 		data, err := os.ReadFile(tmpFile)
 		require.NoError(t, err)
-		assert.Contains(t, string(data), "key1: value1")
-		assert.Contains(t, string(data), "key2: value2")
+		assert.Contains(t, string(data), "prefix1.key1: value1")
+		assert.Contains(t, string(data), "prefix1.key2: value2")
 		assert.NotContains(t, string(data), "prefix2.key1")
 	})
 
@@ -453,14 +453,14 @@ func TestFileSource_Persist(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		err = f.Persist(mgr, "prefix1", "prefix2")
+		err = f.Persist(mgr, "", "prefix1.key1", "prefix2.key1")
 		require.NoError(t, err)
 
-		// Verify file contents - note that keys may overwrite since output is flattened
+		// Verify file contents - should include keys without namespace prefix
 		data, err := os.ReadFile(tmpFile)
 		require.NoError(t, err)
-		// Only one of the key1 values will be present (implementation dependent)
-		assert.Contains(t, string(data), "key1:")
+		assert.Contains(t, string(data), "key1: value1") // prefix1 stripped
+		assert.Contains(t, string(data), "key1: value2") // prefix2 stripped
 		assert.NotContains(t, string(data), "prefix3.key1")
 	})
 
@@ -471,7 +471,7 @@ func TestFileSource_Persist(t *testing.T) {
 		f := NewFileSource(tmpFile).(*fileSource)
 		mgr := newMockManager()
 
-		err := f.Persist(mgr)
+		err := f.Persist(mgr, "")
 		require.NoError(t, err)
 
 		// Verify file is empty
@@ -496,7 +496,7 @@ func TestFileSource_Persist(t *testing.T) {
 		err = mgr.BulkSetAtomic(context.Background(), map[string]any{"key": "value"})
 		require.NoError(t, err)
 
-		err = f.Persist(mgr)
+		err = f.Persist(mgr, "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to create temporary file")
 	})
@@ -511,7 +511,7 @@ func TestFileSource_Persist(t *testing.T) {
 		err := mgr.BulkSetAtomic(context.Background(), map[string]any{"key": make(chan int)})
 		require.NoError(t, err)
 
-		err = f.Persist(mgr)
+		err = f.Persist(mgr, "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot persist config")
 	})

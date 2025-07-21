@@ -59,14 +59,14 @@ func FindSourceByType[T ConfigSource](sources []ConfigSource) (T, error) {
 type PersistableConfigSource interface {
 	ConfigSource
 	// Persist writes configuration changes back to the source.
-	Persist(cm configManager, keyPrefix ...string) error
+	Persist(cm configManager, namespace string, keys ...string) error
 }
 type configManager interface {
 	Get(string, ...any) (any, any, error)
 	Exists(key string) bool
 	Set(ctx context.Context, key string, value any) error
 	BulkSet(ctx context.Context, updates map[string]any) error
-	SetAtomic(ctx context.Context, updates map[string]any) error 
+	SetAtomic(ctx context.Context, updates map[string]any) error
 	BulkSetAtomic(ctx context.Context, updates map[string]any) error
 	Delete(key string)
 	Keys() []string
