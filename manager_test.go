@@ -317,6 +317,13 @@ func TestConfigManager_All(t *testing.T) {
 }
 
 func TestConfigManager_RegisterStructGet(t *testing.T) {
+	t.Run("nil config returns no error", func(t *testing.T) {
+		cm := newTestManager()
+		err := cm.RegisterStruct("test.nil", nil)
+		assert.NoError(t, err)
+		assert.False(t, cm.hasConfigStruct("test.nil"))
+	})
+
 	t.Run("value registration with pointer target", func(t *testing.T) {
 		cm := newTestManager()
 		// Register the value type
@@ -351,6 +358,17 @@ func TestConfigManager_RegisterStructGet(t *testing.T) {
 		assert.IsType(t, map[string]interface{}{}, raw)
 		assert.IsType(t, &TestConfig{}, decoded)
 		assert.Equal(t, "nil_target", decoded.(*TestConfig).StringValue)
+	})
+
+	t.Run("typed nil pointer registers underlying type", func(t *testing.T) {
+		cm := newTestManager()
+		var p *TestConfig = nil
+		err := cm.RegisterStruct("test.typednil", p)
+		assert.NoError(t, err)
+		assert.True(t, cm.hasConfigStruct("test.typednil"))
+		regs := cm.GetRegisteredStructs()
+		require.Contains(t, regs, "test.typednil")
+		assert.Equal(t, reflect.TypeOf(TestConfig{}), regs["test.typednil"])
 	})
 
 	t.Run("value registration with value target", func(t *testing.T) {
