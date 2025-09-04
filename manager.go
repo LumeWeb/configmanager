@@ -523,7 +523,14 @@ func (cm *ConfigManagerDefault) Get(key string, target ...any) (any, any, error)
 
 // RegisterStruct registers a configuration struct type for a key at runtime.
 // Returns an error if the key is already registered to a different type.
+// If cfg is a nil interface, this is a no-op.
+// If cfg is a typed nil pointer (e.g., (*MyCfg)(nil)), the underlying value type is registered.
 func (cm *ConfigManagerDefault) RegisterStruct(key string, cfg any) error {
+	if cfg == nil {
+		cm.logger.Debug("RegisterStruct called with nil cfg; no-op", zap.String("key", key))
+		return nil
+	}
+
 	cm.configStructLock.Lock()
 	defer cm.configStructLock.Unlock()
 
