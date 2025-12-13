@@ -35,6 +35,8 @@ func (cm *ConfigManagerDefault) copy() *ConfigManagerDefault {
 	return &ConfigManagerDefault{
 		koanf:             kkoanf.New(cm.Delim()),
 		sources:           cm.sources,
+		loadedSources:     make(map[source.ConfigSource]bool), // Fresh map for copy
+		watchedSources:    make(map[source.ConfigSource]bool), // Fresh map for copy
 		logger:            cm.logger,
 		events:            cm.events,
 		flagManager:       cm.flagManager,
@@ -54,6 +56,8 @@ type ConfigManagerDefault struct {
 	syncMgr           csync.Manager
 	koanf             *kkoanf.Koanf
 	sources           []source.ConfigSource
+	loadedSources     map[source.ConfigSource]bool // Track which sources have been loaded
+	watchedSources    map[source.ConfigSource]bool // Track which sources have watchers started
 	logger            *zap.Logger
 	validationEnabled bool
 	validationLock    sync.RWMutex
@@ -302,6 +306,8 @@ func NewConfigManager(sources any, opts ...ConfigOption) (*ConfigManagerDefault,
 	cm := &ConfigManagerDefault{
 		koanf:             k,
 		sources:           configSources,
+		loadedSources:     make(map[source.ConfigSource]bool),
+		watchedSources:    make(map[source.ConfigSource]bool),
 		logger:            zap.NewNop(), // Default no-op logger
 		events:            eventMgr,
 		flagManager:       NewFlagManager(),
@@ -395,25 +401,40 @@ func (cm *ConfigManagerDefault) loadSource(src source.ConfigSource) error {
 	return nil
 }
 
-// Load loads the initial configuration from the configured sources.
-func (cm *ConfigManagerDefault) Load() error {
+// loadSources is the common implementation for loading sources.
+// If onlyNew is true, only sources that haven't been loaded before will be processed.
+// If onlyNew is false, all sources will be processed.
+func (cm *ConfigManagerDefault) loadSources(onlyNew bool) error {
 	// Disable validation during initial load to avoid validation errors
 	// from partially loaded configurations
 	cm.DisableValidation()
 	defer cm.EnableValidation()
 
 	for _, src := range cm.sources {
+		// Skip if only loading new sources and this one is already loaded
+		if onlyNew && cm.loadedSources[src] {
+			continue
+		}
+
 		if err := cm.loadSource(src); err != nil {
 			return fmt.Errorf("failed to load config from source %T: %w", src, err)
 		}
 
-		// Start watching if supported
-		if err := src.Watch(context.Background(), cm, func(changedKeys []string, err error) {
-			cm.handleConfigChanges(src, changedKeys)
-		}); err != nil {
-			cm.logger.Warn("failed to start config watcher",
-				zap.String("source", fmt.Sprintf("%T", src)),
-				zap.Error(err))
+		// Mark this source as loaded
+		cm.loadedSources[src] = true
+
+		// Start watching if supported and not already watching
+		if !cm.watchedSources[src] {
+			if err := src.Watch(context.Background(), cm, func(changedKeys []string, err error) {
+				cm.handleConfigChanges(src, changedKeys)
+			}); err != nil {
+				cm.logger.Warn("failed to start config watcher",
+					zap.String("source", fmt.Sprintf("%T", src)),
+					zap.Error(err))
+			} else {
+				// Mark as watched only if Watch() succeeded
+				cm.watchedSources[src] = true
+			}
 		}
 	}
 
@@ -423,6 +444,18 @@ func (cm *ConfigManagerDefault) Load() error {
 	}
 
 	return nil
+}
+
+// Load loads configuration from only new sources that haven't been loaded before.
+// This method is atomic and will not reload sources that have already been processed.
+func (cm *ConfigManagerDefault) Load() error {
+	return cm.loadSources(true)
+}
+
+// LoadAll loads configuration from all configured sources, processing everything again.
+// This method reloads all sources regardless of whether they were loaded before.
+func (cm *ConfigManagerDefault) LoadAll() error {
+	return cm.loadSources(false)
 }
 
 // GetString returns the string value for the given key.

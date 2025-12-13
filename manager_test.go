@@ -1682,3 +1682,196 @@ func TestConfigManager_ValidateWithZogSchema(t *testing.T) {
 		assert.Equal(t, "Valid1234", decoded)
 	})
 }
+
+func TestConfigManager_LoadAtomic(t *testing.T) {
+	// Create initial sources
+	initialData := map[string]any{
+		"initial.key": "initial_value",
+		"shared.key":  "initial_shared",
+	}
+
+	initialSource := source.NewMemoryConfigSource(initialData)
+	cm, err := NewConfigManager([]source.ConfigSource{initialSource})
+	require.NoError(t, err)
+	require.NotNil(t, cm)
+
+	// First load should load the initial source
+	err = cm.Load()
+	require.NoError(t, err)
+
+	// Verify initial data is loaded
+	val, err := cm.GetString("initial.key")
+	require.NoError(t, err)
+	assert.Equal(t, "initial_value", val)
+
+	// Add a new source after initial load
+	newData := map[string]any{
+		"new.key":    "new_value",
+		"shared.key": "new_shared", // This should override the initial value
+	}
+	newSource := source.NewMemoryConfigSource(newData)
+	cm.RegisterSource(newSource)
+
+	// Load should only load the new source (atomic behavior)
+	err = cm.Load()
+	require.NoError(t, err)
+
+	// Verify new data is loaded
+	val, err = cm.GetString("new.key")
+	require.NoError(t, err)
+	assert.Equal(t, "new_value", val)
+
+	// Verify shared key was updated by new source
+	val, err = cm.GetString("shared.key")
+	require.NoError(t, err)
+	assert.Equal(t, "new_shared", val)
+
+	// Verify initial data is still there
+	val, err = cm.GetString("initial.key")
+	require.NoError(t, err)
+	assert.Equal(t, "initial_value", val)
+}
+
+func TestConfigManager_LoadAll(t *testing.T) {
+	// Create initial sources
+	initialData := map[string]any{
+		"initial.key": "initial_value",
+		"shared.key":  "initial_shared",
+	}
+
+	initialSource := source.NewMemoryConfigSource(initialData)
+	cm, err := NewConfigManager([]source.ConfigSource{initialSource})
+	require.NoError(t, err)
+	require.NotNil(t, cm)
+
+	// First load should load the initial source
+	err = cm.Load()
+	require.NoError(t, err)
+
+	// Verify initial data is loaded
+	val, err := cm.GetString("initial.key")
+	require.NoError(t, err)
+	assert.Equal(t, "initial_value", val)
+
+	// Modify the initial source data (simulating external changes)
+	modifiedData := map[string]any{
+		"initial.key": "modified_value",
+		"shared.key":  "modified_shared",
+	}
+
+	// Since we can't easily modify a MemoryConfigSource after creation,
+	// we'll create a new source and replace the old one
+	modifiedSource := source.NewMemoryConfigSource(modifiedData)
+	cm.sources[0] = modifiedSource // Replace the source
+
+	// LoadAll should reload all sources, picking up the modified data
+	err = cm.LoadAll()
+	require.NoError(t, err)
+
+	// Verify the data was reloaded from the modified source
+	val, err = cm.GetString("initial.key")
+	require.NoError(t, err)
+	assert.Equal(t, "modified_value", val)
+
+	val, err = cm.GetString("shared.key")
+	require.NoError(t, err)
+	assert.Equal(t, "modified_shared", val)
+}
+
+func TestConfigManager_LoadIdempotent(t *testing.T) {
+	// Test that calling Load multiple times without adding new sources is idempotent
+	data := map[string]any{
+		"test.key": "test_value",
+	}
+
+	testSource := source.NewMemoryConfigSource(data)
+	cm, err := NewConfigManager([]source.ConfigSource{testSource})
+	require.NoError(t, err)
+	require.NotNil(t, cm)
+
+	// First load
+	err = cm.Load()
+	require.NoError(t, err)
+
+	val1, err := cm.GetString("test.key")
+	require.NoError(t, err)
+	assert.Equal(t, "test_value", val1)
+
+	// Second load should be idempotent (no new sources)
+	err = cm.Load()
+	require.NoError(t, err)
+
+	val2, err := cm.GetString("test.key")
+	require.NoError(t, err)
+	assert.Equal(t, "test_value", val2)
+	assert.Equal(t, val1, val2)
+}
+
+func TestConfigManager_LoadWithMultipleSources(t *testing.T) {
+	// Test atomic loading with multiple sources added incrementally
+	source1Data := map[string]any{
+		"source1.key": "source1_value",
+		"common.key":  "source1_common",
+	}
+
+	source2Data := map[string]any{
+		"source2.key": "source2_value",
+		"common.key":  "source2_common",
+	}
+
+	source3Data := map[string]any{
+		"source3.key": "source3_value",
+		"common.key":  "source3_common",
+	}
+
+	source1 := source.NewMemoryConfigSource(source1Data)
+	cm, err := NewConfigManager([]source.ConfigSource{source1})
+	require.NoError(t, err)
+	require.NotNil(t, cm)
+
+	// Load first source
+	err = cm.Load()
+	require.NoError(t, err)
+
+	val, err := cm.GetString("source1.key")
+	require.NoError(t, err)
+	assert.Equal(t, "source1_value", val)
+
+	val, err = cm.GetString("common.key")
+	require.NoError(t, err)
+	assert.Equal(t, "source1_common", val)
+
+	// Add second source
+	source2 := source.NewMemoryConfigSource(source2Data)
+	cm.RegisterSource(source2)
+
+	// Load should only add the second source
+	err = cm.Load()
+	require.NoError(t, err)
+
+	val, err = cm.GetString("source2.key")
+	require.NoError(t, err)
+	assert.Equal(t, "source2_value", val)
+
+	// Common key should be from source2 (later source wins)
+	val, err = cm.GetString("common.key")
+	require.NoError(t, err)
+	assert.Equal(t, "source2_common", val)
+
+	// Add third source
+	source3 := source.NewMemoryConfigSource(source3Data)
+	cm.RegisterSource(source3)
+
+	// Load should only add the third source
+	err = cm.Load()
+	require.NoError(t, err)
+
+	val, err = cm.GetString("source3.key")
+	require.NoError(t, err)
+	assert.Equal(t, "source3_value", val)
+
+	// Common key should be from source3 (latest source wins)
+	val, err = cm.GetString("common.key")
+	require.NoError(t, err)
+	assert.Equal(t, "source3_common", val)
+}
