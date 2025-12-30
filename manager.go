@@ -1057,9 +1057,14 @@ func (cm *ConfigManagerDefault) schemaValidate(key string, value any, schema zog
 	if len(issues) > 0 {
 		var errs []error
 		for _, issue := range issues {
-			fullPath := key
+			if len(issue.Message) == 0 {
+				continue
+			}
+			var fullPath string
 			if len(issue.Path) > 0 {
 				fullPath = fmt.Sprintf("%s.%s", key, issue.PathString())
+			} else {
+				fullPath = key
 			}
 			errs = append(errs, fmt.Errorf("%s: %s", fullPath, issue.Message))
 		}
