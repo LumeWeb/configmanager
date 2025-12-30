@@ -1683,6 +1683,75 @@ func TestConfigManager_ValidateWithZogSchema(t *testing.T) {
 	})
 }
 
+func TestConfigManager_SchemaValidate_RootLevelError(t *testing.T) {
+	cm, _ := NewConfigManager([]source.ConfigSource{})
+	logger := zap.NewNop()
+	cm.logger = logger
+
+	// Define a struct with a required field
+	type RootLevelConfig struct {
+		Field string `config:"field"`
+	}
+
+	// Implement ConfigSchemaProvider with a required field
+	rootConfig := &RootLevelConfig{}
+	rootSchema := zog.Struct(zog.Shape{
+		"field": zog.String().Required(),
+	})
+
+	// Set empty data (missing required field)
+	err := cm.Set(context.Background(), "test.root.field", "")
+	assert.NoError(t, err)
+
+	// Register the struct
+	err = cm.RegisterStruct("test.root", rootConfig)
+	assert.NoError(t, err)
+
+	// Get the struct first
+	_, decoded, err := cm.Get("test.root")
+	assert.NoError(t, err)
+
+	// Now validate - should fail with root-level error
+	err = cm.schemaValidate("test.root", decoded, rootSchema)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "configuration validation failed")
+	assert.Contains(t, err.Error(), "test.root")
+	// The error should mention the required field
+	assert.Contains(t, err.Error(), "required")
+}
+
+func TestConfigManager_SchemaValidate_EmptyMessageSkipped(t *testing.T) {
+	cm, _ := NewConfigManager([]source.ConfigSource{})
+	logger := zap.NewNop()
+	cm.logger = logger
+
+	// Define a struct
+	type EmptyMessageConfig struct {
+		Field string `config:"field"`
+	}
+
+	emptyMsgConfig := &EmptyMessageConfig{}
+	emptyMsgSchema := zog.Struct(zog.Shape{
+		"field": zog.String().Min(1),
+	})
+
+	// Set valid data
+	err := cm.Set(context.Background(), "test.empty", map[string]any{"field": "valid"})
+	assert.NoError(t, err)
+
+	// Register the struct
+	err = cm.RegisterStruct("test.empty", emptyMsgConfig)
+	assert.NoError(t, err)
+
+	// Get the struct
+	_, decoded, err := cm.Get("test.empty")
+	assert.NoError(t, err)
+
+	// Validate - should pass
+	err = cm.schemaValidate("test.empty", decoded, emptyMsgSchema)
+	assert.NoError(t, err)
+}
+
 func TestConfigManager_LoadAtomic(t *testing.T) {
 	// Create initial sources
 	initialData := map[string]any{

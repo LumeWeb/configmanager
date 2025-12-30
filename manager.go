@@ -1037,14 +1037,14 @@ func (cm *ConfigManagerDefault) validateValue(key string, val any) error {
 	return nil
 }
 func (cm *ConfigManagerDefault) schemaValidate(key string, value any, schema zog.ZogSchema) error {
-	var issues zog.ZogIssueMap
+	var issues zog.ZogIssueList
 
 	switch v := schema.(type) {
 	case *zog.StructSchema:
-		// Struct schemas return issue maps
+		// Struct schemas return issue lists
 		issues = v.Validate(value)
 	case *zog.PointerSchema:
-		// Pointer schemas return issue maps
+		// Pointer schemas return issue lists
 		issues = v.Validate(value)
 	default:
 		err := fmt.Errorf("unsupported schema type for validation: %T", schema)
@@ -1055,20 +1055,19 @@ func (cm *ConfigManagerDefault) schemaValidate(key string, value any, schema zog
 	}
 
 	if len(issues) > 0 {
-		// Convert issues to sanitized error messages
-		sanitized := zog.Issues.SanitizeMap(issues)
 		var errs []error
-		for path, messages := range sanitized {
-			fullPath := key
-			if path != schemaValidationRootPath {
-				fullPath = fmt.Sprintf("%s.%s", key, path)
+		for _, issue := range issues {
+			if len(issue.Message) == 0 {
+				continue
 			}
-			for _, msg := range messages {
-				errs = append(errs, fmt.Errorf("%s: %s", fullPath, msg))
+			var fullPath string
+			if len(issue.Path) > 0 {
+				fullPath = fmt.Sprintf("%s.%s", key, issue.PathString())
+			} else {
+				fullPath = key
 			}
+			errs = append(errs, fmt.Errorf("%s: %s", fullPath, issue.Message))
 		}
-		// Collect the issues for reuse
-		zog.Issues.CollectMap(issues)
 		return fmt.Errorf("configuration validation failed for %s: %v", key, errs)
 	}
 	return nil
