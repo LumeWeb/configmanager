@@ -1,0 +1,11 @@
+## 0.3.23 (2026-01-07)
+
+### Features
+
+- add configuration key description management
+
+### Fixes
+
+- ensure atomic rollback on sync failure and propagate watch errors
+- add mutex to ensure atomic Set operations with sync
+- Add descriptions support and increase code coverage
