@@ -1944,3 +1944,472 @@ func TestConfigManager_LoadWithMultipleSources(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "source3_common", val)
 }
+
+func TestConfigManager_ReloadConfig(t *testing.T) {
+	t.Run("successful reload", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{
+			"test.key": "initial_value",
+		})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		err = cm.Load()
+		require.NoError(t, err)
+
+		memSource.Set("test.key", "reloaded_value")
+
+		err = cm.reloadConfig(context.Background(), memSource)
+		assert.NoError(t, err)
+
+		val, _, err := cm.Get("test.key")
+		assert.NoError(t, err)
+		assert.Equal(t, "reloaded_value", val)
+	})
+
+	t.Run("reload error", func(t *testing.T) {
+		cm := newTestManager()
+		invalidSource := source.New("load error", "watch error")
+
+		err := cm.reloadConfig(context.Background(), invalidSource)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to reload config")
+	})
+}
+
+func TestConfigManager_ReloadKey(t *testing.T) {
+	t.Run("successful reload of existing key", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{
+			"test.key": "initial_value",
+		})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		err = cm.Load()
+		require.NoError(t, err)
+
+		oldValue, _, _ := cm.Get("test.key")
+		assert.Equal(t, "initial_value", oldValue)
+
+		memSource.Set("test.key", "reloaded_value")
+
+		err = cm.reloadKey(context.Background(), memSource, "test.key")
+		assert.NoError(t, err)
+
+		newValue, _, err := cm.Get("test.key")
+		assert.NoError(t, err)
+		assert.Equal(t, "reloaded_value", newValue)
+	})
+
+	t.Run("reload key that doesn't exist in source", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{
+			"test.key": "initial_value",
+		})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		err = cm.Load()
+		require.NoError(t, err)
+
+		err = cm.reloadKey(context.Background(), memSource, "nonexistent.key")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not found in source")
+	})
+
+	t.Run("reload error from source", func(t *testing.T) {
+		cm := newTestManager()
+		invalidSource := source.New("load error", "watch error")
+
+		err := cm.reloadKey(context.Background(), invalidSource, "test.key")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to get new value")
+	})
+
+	t.Run("set error during reload", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{
+			"test.key": "initial_value",
+		})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		err = cm.Load()
+		require.NoError(t, err)
+
+		memSource.Clear()
+
+		err = cm.reloadKey(context.Background(), memSource, "test.key")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not found in source")
+	})
+}
+
+func TestConfigManager_GetKeyFromSource(t *testing.T) {
+	t.Run("successful get", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{
+			"test.key": "test_value",
+		})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		err = cm.Load()
+		require.NoError(t, err)
+
+		val, err := cm.getKeyFromSource(context.Background(), memSource, "test.key")
+		assert.NoError(t, err)
+		assert.Equal(t, "test_value", val)
+	})
+
+	t.Run("key not found", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{
+			"test.key": "test_value",
+		})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		err = cm.Load()
+		require.NoError(t, err)
+
+		_, err = cm.getKeyFromSource(context.Background(), memSource, "nonexistent.key")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not found in source")
+	})
+
+	t.Run("load error", func(t *testing.T) {
+		cm := newTestManager()
+		invalidSource := source.New("load error", "watch error")
+
+		_, err := cm.getKeyFromSource(context.Background(), invalidSource, "test.key")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to load config from source")
+	})
+}
+
+func TestConfigManager_NotifySubscribers(t *testing.T) {
+	t.Run("successful notification", func(t *testing.T) {
+		cm := newTestManager()
+
+		var received bool
+		var receivedKey string
+		var receivedNewValue any
+
+		unsub := cm.Subscribe("test.key", func(pattern, key string, value any) {
+			received = true
+			receivedKey = key
+			receivedNewValue = value
+		})
+		defer unsub()
+
+		cm.notifySubscribers("test.key", nil, "new_value")
+
+		assert.True(t, received)
+		assert.Equal(t, "test.key", receivedKey)
+		assert.Equal(t, "new_value", receivedNewValue)
+	})
+
+	t.Run("notification with old and new values", func(t *testing.T) {
+		cm := newTestManager()
+
+		var received bool
+		var receivedNewValue any
+
+		unsub := cm.Subscribe("test.key", func(pattern, key string, value any) {
+			received = true
+			receivedNewValue = value
+		})
+		defer unsub()
+
+		cm.notifySubscribers("test.key", "old_value", "new_value")
+
+		assert.True(t, received)
+		assert.Equal(t, "new_value", receivedNewValue)
+	})
+}
+
+func TestConfigManager_HandleConfigChanges(t *testing.T) {
+	t.Run("empty changed keys", func(t *testing.T) {
+		cm := newTestManager()
+		memSource := source.NewMemoryConfigSource(map[string]any{})
+
+		cm.handleConfigChanges(memSource, []string{})
+	})
+
+	t.Run("watch all changes reload", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{
+			"test.key": "initial_value",
+		})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		err = cm.Load()
+		require.NoError(t, err)
+
+		memSource.Set("test.key", "updated_value")
+
+		cm.handleConfigChanges(memSource, []string{source.WatchAllChanges})
+
+		val, _, err := cm.Get("test.key")
+		assert.NoError(t, err)
+		assert.Equal(t, "updated_value", val)
+	})
+
+	t.Run("watch all changes reload error", func(t *testing.T) {
+		cm := newTestManager()
+		invalidSource := source.New("load error", "watch error")
+
+		cm.handleConfigChanges(invalidSource, []string{source.WatchAllChanges})
+	})
+
+	t.Run("single key change", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{
+			"test.key": "initial_value",
+		})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		err = cm.Load()
+		require.NoError(t, err)
+
+		memSource.Set("test.key", "updated_value")
+
+		var notified bool
+		unsub := cm.Subscribe("test.key", func(pattern, key string, value any) {
+			notified = true
+		})
+		defer unsub()
+
+		cm.handleConfigChanges(memSource, []string{"test.key"})
+
+		val, _, err := cm.Get("test.key")
+		assert.NoError(t, err)
+		assert.Equal(t, "updated_value", val)
+		assert.True(t, notified)
+	})
+
+	t.Run("get key from source error", func(t *testing.T) {
+		invalidSource := source.New("load error", "watch error")
+		cm, err := NewConfigManager([]source.ConfigSource{invalidSource})
+		require.NoError(t, err)
+
+		cm.handleConfigChanges(invalidSource, []string{"test.key"})
+	})
+
+	t.Run("bulk set atomic error", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{
+			"test.key": "value",
+		})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		err = cm.RegisterStruct("test.struct", testStruct{})
+		require.NoError(t, err)
+
+		memSource.Set("test.struct.name", "")
+		memSource.Set("test.struct.age", 25)
+
+		cm.handleConfigChanges(memSource, []string{"test.struct.name", "test.struct.age"})
+	})
+}
+
+func TestConfigManager_SetInternal(t *testing.T) {
+	t.Run("set with validation enabled and no sync", func(t *testing.T) {
+		cm := newTestManager()
+
+		err := cm.Set(context.Background(), "test.key", "value")
+		assert.NoError(t, err)
+
+		val, _, err := cm.Get("test.key")
+		assert.NoError(t, err)
+		assert.Equal(t, "value", val)
+	})
+
+	t.Run("set with validation disabled", func(t *testing.T) {
+		cm := newTestManager()
+		cm.DisableValidation()
+
+		var notified bool
+		unsub := cm.Subscribe("test.key", func(pattern, key string, value any) {
+			notified = true
+		})
+		defer unsub()
+
+		err := cm.Set(context.Background(), "test.key", "value")
+		assert.NoError(t, err)
+		assert.True(t, notified)
+	})
+
+	t.Run("set with sync manager", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		cm.flagManager.SetFlags("test.key", []string{"sync"})
+
+		var pushCalled bool
+		mockSync := &mockSyncManager{
+			push: func(ctx context.Context, key string, value any, callback csync.PushCallback) error {
+				pushCalled = true
+				return nil
+			},
+		}
+		cm.syncMgr = mockSync
+
+		err = cm.Set(context.Background(), "test.key", "value")
+		assert.NoError(t, err)
+		assert.True(t, pushCalled)
+	})
+
+	t.Run("set with sync manager error", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		cm.flagManager.SetFlags("test.key", []string{"sync"})
+
+		var pushCalled bool
+		mockSync := &mockSyncManager{
+			push: func(ctx context.Context, key string, value any, callback csync.PushCallback) error {
+				pushCalled = true
+				return fmt.Errorf("sync error")
+			},
+		}
+		cm.syncMgr = mockSync
+
+		err = cm.Set(context.Background(), "test.key", "value")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to push config to sync manager")
+		assert.True(t, pushCalled)
+
+		// Verify that the set operation was rolled back and the key does not exist.
+		assert.False(t, cm.Exists("test.key"))
+	})
+
+	t.Run("set with struct validation", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		err = cm.RegisterStruct("test.struct", testStruct{})
+		require.NoError(t, err)
+
+		cm.DisableValidation()
+		err = cm.Set(context.Background(), "test.struct.name", "valid_name")
+		assert.NoError(t, err)
+		err = cm.Set(context.Background(), "test.struct.age", 25)
+		assert.NoError(t, err)
+		cm.EnableValidation()
+
+		val, _, err := cm.Get("test.struct.name")
+		assert.NoError(t, err)
+		assert.Equal(t, "valid_name", val)
+	})
+
+}
+
+func TestConfigManager_BulkSetAtomicInternal(t *testing.T) {
+	t.Run("successful bulk set with validation", func(t *testing.T) {
+		cm := newTestManager()
+
+		updates := map[string]any{
+			"test.key1": "value1",
+			"test.key2": "value2",
+		}
+
+		err := cm.bulkSetAtomicInternal(context.Background(), updates, true)
+		assert.NoError(t, err)
+
+		val1, _, _ := cm.Get("test.key1")
+		assert.Equal(t, "value1", val1)
+		val2, _, _ := cm.Get("test.key2")
+		assert.Equal(t, "value2", val2)
+	})
+
+	t.Run("bulk set without validation", func(t *testing.T) {
+		cm := newTestManager()
+
+		updates := map[string]any{
+			"test.key": "value",
+		}
+
+		err := cm.bulkSetAtomicInternal(context.Background(), updates, false)
+		assert.NoError(t, err)
+	})
+
+	t.Run("bulk set with validation failure and rollback", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		err = cm.RegisterStruct("test.struct", testStruct{})
+		require.NoError(t, err)
+
+		cm.DisableValidation()
+		err = cm.Set(context.Background(), "test.struct.name", "initial_name")
+		require.NoError(t, err)
+		cm.EnableValidation()
+
+		updates := map[string]any{
+			"test.struct.name": "",
+		}
+
+		err = cm.bulkSetAtomicInternal(context.Background(), updates, true)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "validation failed")
+
+		val, _, err := cm.Get("test.struct.name")
+		assert.NoError(t, err)
+		assert.Equal(t, "initial_name", val)
+	})
+
+	t.Run("bulk set with sync", func(t *testing.T) {
+		memSource := source.NewMemoryConfigSource(map[string]any{})
+		cm, err := NewConfigManager([]source.ConfigSource{memSource})
+		require.NoError(t, err)
+
+		cm.flagManager.SetFlags("test.key", []string{"sync"})
+
+		var pushCalled bool
+		mockSync := &mockSyncManager{
+			push: func(ctx context.Context, key string, value any, callback csync.PushCallback) error {
+				pushCalled = true
+				return nil
+			},
+		}
+		cm.syncMgr = mockSync
+
+		updates := map[string]any{
+			"test.key": "value",
+		}
+
+		err = cm.bulkSetAtomicInternal(context.Background(), updates, true)
+		assert.NoError(t, err)
+		assert.True(t, pushCalled)
+	})
+
+	t.Run("deduplicate notifications", func(t *testing.T) {
+		cm := newTestManager()
+
+		err := cm.Set(context.Background(), "test.key", "initial")
+		require.NoError(t, err)
+
+		var notifyCount int
+		unsub := cm.Subscribe("test.key", func(pattern, key string, value any) {
+			notifyCount++
+		})
+		defer unsub()
+
+		updates := map[string]any{
+			"test.key": "initial",
+		}
+
+		err = cm.bulkSetAtomicInternal(context.Background(), updates, true)
+		assert.NoError(t, err)
+		assert.Equal(t, 0, notifyCount)
+
+		updates = map[string]any{
+			"test.key": "new_value",
+		}
+
+		err = cm.bulkSetAtomicInternal(context.Background(), updates, true)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, notifyCount)
+	})
+}

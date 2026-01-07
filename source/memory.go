@@ -83,12 +83,17 @@ func (m *MemoryConfigSource) Watch(ctx context.Context, cm configManager, cb Wat
 			}
 		} else {
 			// Update koanf with current values
+			var setErrs []error
 			for key, value := range m.data {
-				if err := cm.Set(ctx, key, value); err != nil {
+				if setErr := cm.Set(ctx, key, value); setErr != nil {
 					m.logger.Error("failed to update koanf value",
 						zap.String("key", key),
-						zap.Error(err))
+						zap.Error(setErr))
+					setErrs = append(setErrs, setErr)
 				}
+			}
+			if len(setErrs) > 0 {
+				err = fmt.Errorf("failed to set some keys: %w", errors.Join(setErrs...))
 			}
 		}
 		m.mutex.RUnlock()
