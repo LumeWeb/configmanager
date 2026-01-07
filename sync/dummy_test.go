@@ -207,6 +207,30 @@ func TestDummySyncClient_Configure(t *testing.T) {
 	assert.Equal(t, "sync.config", client.configNS)
 }
 
+func TestDummySyncClient_ConfigureWithError(t *testing.T) {
+	client := NewDummySyncClient()
+	mockManager := &mockManager{}
+
+	// Create a sync option that returns an error
+	errorOption := func(c Client) error {
+		return fmt.Errorf("sync option error")
+	}
+
+	err := client.Configure(mockManager, "sync.config", errorOption)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "sync option error")
+}
+
+func TestDummySyncClient_WithLogger(t *testing.T) {
+	client := NewDummySyncClient()
+	logger := zap.NewNop()
+
+	// WithLogger should return the client for chaining
+	result := client.WithLogger(logger)
+	assert.Equal(t, client, result)
+	assert.Equal(t, logger, client.logger)
+}
+
 type mockManager struct {
 	data map[string]any
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 func TestFileSource_Load(t *testing.T) {
@@ -367,12 +368,120 @@ key2: v2
 			t.Fatal("timeout waiting for change notification")
 		}
 	})
+
+	t.Run("watch with parse error", func(t *testing.T) {
+		tmpFile := createTempFile(t, "key: valid\n")
+		defer os.Remove(tmpFile)
+
+		f := NewFileSource(tmpFile).(*fileSource)
+		mgr := newMockManager()
+
+		err := f.Load(context.Background(), mgr)
+		require.NoError(t, err)
+
+		changeChan := make(chan []string, 1)
+		errChan := make(chan error, 1)
+		err = f.Watch(context.Background(), mgr, func(changedKeys []string, err error) {
+			changeChan <- changedKeys
+			errChan <- err
+		})
+		require.NoError(t, err)
+		defer stopWatcher(t, f)
+
+		// Write invalid YAML
+		err = os.WriteFile(tmpFile, []byte("invalid: yaml: content:\nbroken"), 0644)
+		require.NoError(t, err)
+
+		select {
+		case err := <-errChan:
+			assert.Error(t, err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for error notification")
+		}
+	})
+
+	t.Run("watch with set error", func(t *testing.T) {
+		tmpFile := createTempFile(t, "key: initial\n")
+		defer os.Remove(tmpFile)
+
+		f := NewFileSource(tmpFile).(*fileSource)
+		mgr := newMockManager()
+		mgr.shouldFailOnSet = true
+
+		err := f.Load(context.Background(), mgr)
+		require.NoError(t, err)
+
+		errChan := make(chan error, 1)
+		err = f.Watch(context.Background(), mgr, func(changedKeys []string, err error) {
+			errChan <- err
+		})
+		require.NoError(t, err)
+		defer stopWatcher(t, f)
+
+		// Modify file
+		err = os.WriteFile(tmpFile, []byte("key: updated\n"), 0644)
+		require.NoError(t, err)
+
+		select {
+		case err := <-errChan:
+			assert.Error(t, err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for error notification")
+		}
+	})
 }
 
 func TestFileSource_WithChangedThreshold(t *testing.T) {
 	f := NewFileSource("").(*fileSource)
 	WithChangedThreshold(0.8)(f)
 	assert.Equal(t, 0.8, f.changedThreshold)
+}
+
+func TestFileSource_WithFileSourceLogger(t *testing.T) {
+	t.Run("sets custom logger", func(t *testing.T) {
+		logger := zap.NewExample()
+		f := NewFileSource("", WithFileSourceLogger(logger)).(*fileSource)
+		assert.Equal(t, logger, f.logger)
+	})
+
+	t.Run("default logger is no-op", func(t *testing.T) {
+		f := NewFileSource("").(*fileSource)
+		assert.NotNil(t, f.logger)
+	})
+}
+
+func TestFileSource_Load_WithLogging(t *testing.T) {
+	t.Run("logs changes on subsequent load", func(t *testing.T) {
+		tmpFile := createTempFile(t, "key1: value1\n")
+		defer os.Remove(tmpFile)
+
+		// Create a logger that we can use
+		logger := zap.NewNop()
+		f := NewFileSource(tmpFile, WithFileSourceLogger(logger)).(*fileSource)
+		mgr := newMockManager()
+
+		// First load - no changes logged (initial load)
+		err := f.Load(context.Background(), mgr)
+		require.NoError(t, err)
+
+		// Verify initial state
+		val1, _, _ := mgr.Get("key1")
+		assert.Equal(t, "value1", val1)
+
+		// Modify file
+		err = os.WriteFile(tmpFile, []byte("key1: updated\nkey2: value2\n"), 0644)
+		require.NoError(t, err)
+
+		// Second load - changes should be logged (this exercises the logging code path)
+		err = f.Load(context.Background(), mgr)
+		require.NoError(t, err)
+
+		// Verify values were updated
+		val1, _, _ = mgr.Get("key1")
+		val2, _, _ := mgr.Get("key2")
+		assert.Equal(t, "updated", val1)
+		assert.Equal(t, "value2", val2)
+	})
 }
 
 // Helper functions
@@ -425,7 +534,7 @@ func TestFileSource_Persist(t *testing.T) {
 		// First verify the manager has the expected keys
 		err := mgr.BulkSetAtomic(context.Background(), map[string]any{
 			"prefix1.key1": "value1",
-			"prefix1.key2": "value2", 
+			"prefix1.key2": "value2",
 			"prefix2.key1": "value3",
 		})
 		require.NoError(t, err)
@@ -507,7 +616,7 @@ func TestFileSource_Persist(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to create temporary file")
 	})
 
-	t.Run("error writing to temp file", func(t *testing.T) {
+	t.Run("error writing to temp file - unsupported type", func(t *testing.T) {
 		tmpFile := createTempFile(t, "")
 		defer os.Remove(tmpFile)
 
@@ -520,5 +629,120 @@ func TestFileSource_Persist(t *testing.T) {
 		err = f.Persist(mgr, "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot persist config")
+	})
+
+	t.Run("persist with nested structures", func(t *testing.T) {
+		tmpFile := createTempFile(t, "")
+		defer os.Remove(tmpFile)
+
+		f := NewFileSource(tmpFile).(*fileSource)
+		mgr := newMockManager()
+		err := mgr.BulkSetAtomic(context.Background(), map[string]any{
+			"database": map[string]any{
+				"host":     "localhost",
+				"port":     5432,
+				"username": "admin",
+			},
+			"features": []any{"feature1", "feature2"},
+		})
+		require.NoError(t, err)
+
+		err = f.Persist(mgr, "")
+		require.NoError(t, err)
+
+		data, err := os.ReadFile(tmpFile)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), "host: localhost")
+		assert.Contains(t, string(data), "port: 5432")
+		assert.Contains(t, string(data), "- feature1")
+		assert.Contains(t, string(data), "- feature2")
+	})
+
+	t.Run("error when renaming temp file", func(t *testing.T) {
+		// Create a directory at the destination path to make rename fail
+		// (os.Rename cannot overwrite a directory with a file)
+		tmpDir, err := os.MkdirTemp("", "config_test_*.yaml")
+		require.NoError(t, err)
+		defer os.RemoveAll(tmpDir)
+
+		f := NewFileSource(tmpDir).(*fileSource)
+		mgr := newMockManager()
+		err = mgr.BulkSetAtomic(context.Background(), map[string]any{"key": "value"})
+		require.NoError(t, err)
+
+		err = f.Persist(mgr, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to rename")
+	})
+}
+
+func TestCheckForUnsupportedTypes(t *testing.T) {
+	t.Run("valid types", func(t *testing.T) {
+		validData := map[string]any{
+			"string": "value",
+			"number": 42,
+			"float":  3.14,
+			"bool":   true,
+			"slice":  []any{1, 2, 3},
+			"nested": map[string]any{
+				"inner": map[string]any{
+					"deep": "value",
+				},
+			},
+		}
+
+		err := checkForUnsupportedTypes(validData)
+		assert.NoError(t, err)
+	})
+
+	t.Run("function type", func(t *testing.T) {
+		invalidData := map[string]any{
+			"valid":   "value",
+			"invalid": func() {},
+		}
+
+		err := checkForUnsupportedTypes(invalidData)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported type")
+	})
+
+	t.Run("channel type", func(t *testing.T) {
+		invalidData := map[string]any{
+			"valid":   "value",
+			"invalid": make(chan int),
+		}
+
+		err := checkForUnsupportedTypes(invalidData)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported type")
+		assert.Contains(t, err.Error(), "channel")
+	})
+
+	t.Run("nested function type", func(t *testing.T) {
+		invalidData := map[string]any{
+			"nested": map[string]any{
+				"deep": map[string]any{
+					"invalid": func() {},
+				},
+			},
+		}
+
+		err := checkForUnsupportedTypes(invalidData)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported type")
+	})
+
+	t.Run("function in slice", func(t *testing.T) {
+		invalidData := map[string]any{
+			"items": []any{
+				"valid",
+				42,
+				func() {},
+			},
+		}
+
+		err := checkForUnsupportedTypes(invalidData)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported type")
 	})
 }

@@ -42,11 +42,13 @@ func numericEqual(a, b any) bool {
 
 // mockManager is a mock implementation of configManager and manager interfaces
 type mockManager struct {
-	mu       sync.RWMutex
-	data     map[string]any
-	structs  map[string]reflect.Type
-	delim    string
-	setCalls []string // tracks Set calls for testing
+	mu              sync.RWMutex
+	data            map[string]any
+	structs         map[string]reflect.Type
+	delim           string
+	setCalls        []string // tracks Set calls for testing
+	shouldFailOnSet bool     // flag to make Set return an error
+	shouldFailOnGet bool     // flag to make Get return an error
 }
 
 func newMockManager(delim ...string) *mockManager {
@@ -89,6 +91,9 @@ func (m *mockManager) RegisterStruct(key string, cfg any) error {
 func (m *mockManager) Get(key string, target ...any) (any, any, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.shouldFailOnGet {
+		return nil, nil, fmt.Errorf("mock get error")
+	}
 	val, exists := m.data[key]
 	if !exists {
 		return nil, nil, fmt.Errorf("key %s not found", key)
@@ -109,6 +114,9 @@ func (m *mockManager) Set(ctx context.Context, key string, value any) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.shouldFailOnSet {
+		return fmt.Errorf("mock set error")
+	}
 	m.setCalls = append(m.setCalls, key)
 	m.data[key] = value
 	return nil
@@ -641,4 +649,443 @@ func (p *ParentWithDefaultSourceDefaults) Defaults() map[string]any {
 			"Child": "child1",
 		},
 	}
+}
+
+type BaseDefaults struct {
+	BaseField string `config:"base_field"`
+}
+
+func (b *BaseDefaults) Defaults() map[string]any {
+	return map[string]any{
+		"BaseField": "base_default",
+	}
+}
+
+func TestWithDefaultSourceGlobal(t *testing.T) {
+	t.Run("creates global source when option is set", func(t *testing.T) {
+		mgr := newMockManager()
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceGlobal())
+		assert.True(t, dcs.IsGlobal())
+	})
+
+	t.Run("creates non-global source when option is not set", func(t *testing.T) {
+		mgr := newMockManager()
+		dcs := NewDefaultConfigSource(mgr)
+		assert.False(t, dcs.IsGlobal())
+	})
+
+	t.Run("creates global source with defaults", func(t *testing.T) {
+		mgr := newMockManager()
+		defaults := map[string]any{
+			"app.name": "TestApp",
+		}
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceDefaults(defaults), WithDefaultSourceGlobal())
+		assert.True(t, dcs.IsGlobal())
+		assert.Equal(t, defaults, dcs.defaults)
+	})
+
+	t.Run("creates global source with custom tag name", func(t *testing.T) {
+		mgr := newMockManager()
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceTagName("custom"), WithDefaultSourceGlobal())
+		assert.True(t, dcs.IsGlobal())
+		assert.Equal(t, "custom", dcs.tagName)
+	})
+}
+
+func TestIsGlobal(t *testing.T) {
+	t.Run("returns true for global source", func(t *testing.T) {
+		mgr := newMockManager()
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceGlobal())
+		assert.True(t, dcs.IsGlobal())
+	})
+
+	t.Run("returns false for non-global source", func(t *testing.T) {
+		mgr := newMockManager()
+		dcs := NewDefaultConfigSource(mgr)
+		assert.False(t, dcs.IsGlobal())
+	})
+
+	t.Run("returns false by default", func(t *testing.T) {
+		mgr := newMockManager()
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceDefaults(map[string]any{"key": "value"}))
+		assert.False(t, dcs.IsGlobal())
+	})
+}
+
+func TestFlattenMap(t *testing.T) {
+	t.Run("flattens nested map without prefix", func(t *testing.T) {
+		input := map[string]any{
+			"level1": map[string]any{
+				"level2": map[string]any{
+					"value": "deep",
+				},
+				"simple": 42,
+			},
+		}
+		result := flattenMap(input, "")
+		expected := map[string]any{
+			"level1.level2.value": "deep",
+			"level1.simple":       42,
+		}
+		assert.Equal(t, expected, result)
+	})
+
+	t.Run("flattens nested map with prefix", func(t *testing.T) {
+		input := map[string]any{
+			"child1": "value1",
+			"child2": 123,
+		}
+		result := flattenMap(input, "parent")
+		expected := map[string]any{
+			"parent.child1": "value1",
+			"parent.child2": 123,
+		}
+		assert.Equal(t, expected, result)
+	})
+
+	t.Run("handles empty map", func(t *testing.T) {
+		input := map[string]any{}
+		result := flattenMap(input, "")
+		expected := map[string]any{}
+		assert.Equal(t, expected, result)
+	})
+}
+
+func TestFindConfigDefaults_EmbeddedStructs(t *testing.T) {
+	type ConfigWithEmbeddedDefaults struct {
+		BaseDefaults
+		OwnField string `config:"own_field"`
+	}
+
+	cfg := &ConfigWithEmbeddedDefaults{}
+
+	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
+	err := mgr.RegisterStruct("test", cfg)
+	assert.NoError(t, err)
+
+	err = dcs.Load(context.Background(), mgr)
+	assert.NoError(t, err)
+
+	// Verify base field from embedded struct was set
+	mgr.assertValue(t, "test.base_field", "base_default")
+}
+
+func TestLoad_ErrorPath(t *testing.T) {
+	t.Run("returns error when Set fails in struct defaults", func(t *testing.T) {
+		mgr := newMockManager()
+		mgr.Set(context.Background(), "db.host", "existing")
+
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceTagName("config"))
+		err := mgr.RegisterStruct("db", testConfigWithDefaultSourceDefaults{})
+		assert.NoError(t, err)
+
+		err = dcs.Load(context.Background(), mgr)
+		assert.NoError(t, err) // Should not error since key exists
+	})
+
+	t.Run("returns error when loadStructDefaults fails", func(t *testing.T) {
+		mgr := newMockManager()
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceTagName("config"))
+		err := mgr.RegisterStruct("db", testConfigWithDefaultSourceDefaults{})
+		assert.NoError(t, err)
+
+		// Use nil context to trigger error
+		err = dcs.Load(nil, mgr)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "context cannot be nil")
+	})
+
+	t.Run("returns error when loadStaticDefaults fails", func(t *testing.T) {
+		mgr := newMockManager()
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceDefaults(map[string]any{"key": "value"}))
+
+		// Use nil context to trigger error
+		err := dcs.Load(nil, mgr)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "context cannot be nil")
+	})
+}
+
+func TestSetDefaultValue_ErrorPath(t *testing.T) {
+	t.Run("returns error when Set fails", func(t *testing.T) {
+		mgr := newMockManager()
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceDefaults(map[string]any{"key": "value"}))
+
+		// Try to set with nil context (mock returns error)
+		err := dcs.setDefaultValue(nil, mgr, "key", "value")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "context cannot be nil")
+	})
+}
+
+func TestLoadStaticDefaults_ErrorPath(t *testing.T) {
+	t.Run("returns error when Set fails", func(t *testing.T) {
+		mgr := newMockManager()
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceDefaults(map[string]any{"key": "value"}))
+
+		// Try to load with nil context (mock returns error)
+		err := dcs.loadStaticDefaults(nil, mgr)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "context cannot be nil")
+	})
+}
+
+func TestProcessStructDefaults_ErrorPath(t *testing.T) {
+	t.Run("returns error when Set fails in direct defaults", func(t *testing.T) {
+		mgr := newMockManager()
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceTagName("config"))
+
+		type TestStruct struct {
+			Field string `config:"field"`
+		}
+
+		err := mgr.RegisterStruct("test", TestStruct{})
+		assert.NoError(t, err)
+
+		err = dcs.processStructDefaults(nil, mgr, "test", reflect.TypeOf(TestStruct{}), map[string]any{
+			"Field": "value",
+		})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "context cannot be nil")
+	})
+}
+
+func TestProcessNestedStructs_ErrorPath(t *testing.T) {
+	t.Run("returns error when processing nested struct fails", func(t *testing.T) {
+		mgr := newMockManager()
+		dcs := NewDefaultConfigSource(mgr, WithDefaultSourceTagName("config"))
+
+		type Nested struct {
+			Child string `config:"child"`
+		}
+
+		err := dcs.processStructDefaults(nil, mgr, "test", reflect.TypeOf(Nested{}), map[string]any{
+			"Child": "value",
+		})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "context cannot be nil")
+	})
+}
+
+func TestFindConfigDefaults_NoImplementation(t *testing.T) {
+	type NoDefaults struct {
+		Field string `config:"field"`
+	}
+
+	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
+	err := mgr.RegisterStruct("test", NoDefaults{})
+	assert.NoError(t, err)
+
+	err = dcs.Load(context.Background(), mgr)
+	assert.NoError(t, err)
+
+	// Verify no defaults were set
+	assert.False(t, mgr.Exists("test.field"))
+}
+
+func TestFindMatchingField_NotFound(t *testing.T) {
+	type TestStruct struct {
+		Field string `config:"field"`
+	}
+
+	_, dcs := setupDefaultConfigTest(t, nil, "config")
+
+	// Try to find a non-existent field
+	name, typ, found := dcs.findMatchingField(reflect.TypeOf(TestStruct{}), "NonExistent")
+	assert.False(t, found)
+	assert.Empty(t, name)
+	assert.Nil(t, typ)
+}
+
+func TestFindConfigDefaults_ComplexEmbedded(t *testing.T) {
+	type Base1 struct {
+		Base1Field string `config:"base1_field"`
+	}
+
+	type Base2 struct {
+		Base2Field string `config:"base2_field"`
+	}
+
+	type ComplexStruct struct {
+		Base1
+		Base2
+		OwnField string `config:"own_field"`
+	}
+
+	cfg := &ComplexStruct{}
+
+	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
+	err := mgr.RegisterStruct("test", cfg)
+	assert.NoError(t, err)
+
+	err = dcs.Load(context.Background(), mgr)
+	assert.NoError(t, err)
+
+	// No defaults should be set since neither Base1 nor Base2 implements ConfigDefaults
+	assert.False(t, mgr.Exists("test.base1_field"))
+	assert.False(t, mgr.Exists("test.base2_field"))
+	assert.False(t, mgr.Exists("test.own_field"))
+}
+
+func TestProcessNestedStructs_UnexportedFields(t *testing.T) {
+	type Nested struct {
+		exported   string `config:"exported"`
+		unexported string `config:"unexported"`
+	}
+
+	type Parent struct {
+		Nested Nested `config:"nested"`
+	}
+
+	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
+	err := mgr.RegisterStruct("test", Parent{})
+	assert.NoError(t, err)
+
+	err = dcs.Load(context.Background(), mgr)
+	assert.NoError(t, err)
+
+	// Only exported fields should be processed
+	assert.False(t, mgr.Exists("test.nested.exported"))
+	assert.False(t, mgr.Exists("test.nested.unexported"))
+}
+
+func TestProcessDirectDefaults_NonMatchingField(t *testing.T) {
+	type TestStruct struct {
+		Field string `config:"field"`
+	}
+
+	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
+
+	err := dcs.processDirectDefaults(context.Background(), mgr, "test", reflect.TypeOf(TestStruct{}), map[string]any{
+		"NonExistent": "value",
+	})
+	assert.NoError(t, err)
+
+	// No value should be set
+	assert.False(t, mgr.Exists("test.field"))
+}
+
+func TestFindMatchingField_UnexportedField(t *testing.T) {
+	type TestStruct struct {
+		Exported   string `config:"exported"`
+		unexported string `config:"unexported"`
+	}
+
+	_, dcs := setupDefaultConfigTest(t, nil, "config")
+
+	// Unexported field should not be found
+	name, typ, found := dcs.findMatchingField(reflect.TypeOf(TestStruct{}), "unexported")
+	assert.False(t, found)
+	assert.Empty(t, name)
+	assert.Nil(t, typ)
+
+	// Exported field should be found
+	name, typ, found = dcs.findMatchingField(reflect.TypeOf(TestStruct{}), "Exported")
+	assert.True(t, found)
+	assert.Equal(t, "exported", name)
+	assert.NotNil(t, typ)
+}
+
+func TestFindMatchingField_EmbeddedStructNotFound(t *testing.T) {
+	type Embedded struct {
+		Child string `config:"child"`
+	}
+
+	type Parent struct {
+		Embedded
+		Field string `config:"field"`
+	}
+
+	_, dcs := setupDefaultConfigTest(t, nil, "config")
+
+	// Try to find a field that doesn't exist in the embedded struct
+	name, typ, found := dcs.findMatchingField(reflect.TypeOf(Parent{}), "NonExistent")
+	assert.False(t, found)
+	assert.Empty(t, name)
+	assert.Nil(t, typ)
+}
+
+func TestFindMatchingField_EmbeddedStructCaseSensitive(t *testing.T) {
+	type Embedded struct {
+		Field string `config:"field"`
+	}
+
+	type Parent struct {
+		Embedded
+	}
+
+	_, dcs := setupDefaultConfigTest(t, nil, "config")
+
+	// Field name matching is case sensitive - "Field" is the struct field name
+	name, typ, found := dcs.findMatchingField(reflect.TypeOf(Parent{}), "Field")
+	assert.True(t, found)
+	assert.Equal(t, "field", name) // Returns tag name
+	assert.NotNil(t, typ)
+
+	// Lowercase should not match (case sensitive)
+	name, typ, found = dcs.findMatchingField(reflect.TypeOf(Parent{}), "field")
+	assert.False(t, found)
+	assert.Empty(t, name)
+	assert.Nil(t, typ)
+}
+
+func TestProcessNestedStructs_NonMapDefaults(t *testing.T) {
+	type Nested struct {
+		Child string `config:"child"`
+	}
+
+	type Parent struct {
+		Nested Nested `config:"nested"`
+	}
+
+	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
+	err := mgr.RegisterStruct("test", Parent{})
+	assert.NoError(t, err)
+
+	// Pass non-map defaults for nested struct
+	err = dcs.processStructDefaults(context.Background(), mgr, "test", reflect.TypeOf(Parent{}), map[string]any{
+		"Nested": "not_a_map", // This is a string, not a map
+	})
+	assert.NoError(t, err)
+
+	// Should fall back to getNestedDefaults which returns empty map
+	assert.False(t, mgr.Exists("test.nested.child"))
+}
+
+func TestProcessDirectDefaults_StructField(t *testing.T) {
+	type NestedStruct struct {
+		Field string `config:"field"`
+	}
+
+	type ParentStruct struct {
+		NestedField NestedStruct `config:"nested_field"`
+	}
+
+	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
+
+	// Process defaults where one field is a struct type
+	err := dcs.processDirectDefaults(context.Background(), mgr, "test", reflect.TypeOf(ParentStruct{}), map[string]any{
+		"NestedField": "some_value", // This is a struct field, should be skipped
+	})
+	assert.NoError(t, err)
+
+	// Struct field should not be set in processDirectDefaults
+	assert.False(t, mgr.Exists("test.nested_field"))
+}
+
+func TestProcessDirectDefaults_EmptyPrefix(t *testing.T) {
+	type TestStruct struct {
+		Field string `config:"field"`
+	}
+
+	mgr, dcs := setupDefaultConfigTest(t, nil, "config")
+
+	// Process defaults with empty prefix (tests line 183)
+	err := dcs.processDirectDefaults(context.Background(), mgr, "", reflect.TypeOf(TestStruct{}), map[string]any{
+		"Field": "value",
+	})
+	assert.NoError(t, err)
+
+	// Should set without prefix
+	mgr.assertValue(t, "field", "value")
 }
