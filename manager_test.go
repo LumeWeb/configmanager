@@ -2277,6 +2277,9 @@ func TestConfigManager_SetInternal(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to push config to sync manager")
 		assert.True(t, pushCalled)
+
+		// Verify that the set operation was rolled back and the key does not exist.
+		assert.False(t, cm.Exists("test.key"))
 	})
 
 	t.Run("set with struct validation", func(t *testing.T) {

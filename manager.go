@@ -931,6 +931,17 @@ func (cm *ConfigManagerDefault) setInternal(ctx context.Context, key string, val
 			}
 		})
 		if err != nil {
+			// Revert the change if sync fails to maintain atomicity
+			cm.logger.Debug("reverting config change due to sync failure",
+				zap.String("key", key),
+				zap.Any("oldValue", oldValue))
+			if oldValue == nil {
+				// Key didn't exist before, delete it
+				cm.koanf.Delete(key)
+			} else {
+				// Key existed before, restore its old value
+				_ = cm.koanf.Set(key, oldValue)
+			}
 			cm.logger.Error("failed to push config to sync manager after local set",
 				zap.String("key", key),
 				zap.Error(err))

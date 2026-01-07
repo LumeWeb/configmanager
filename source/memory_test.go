@@ -700,9 +700,13 @@ func TestMemoryConfigSource_WatchWithFailedSets(t *testing.T) {
 	}
 
 	changeChan := make(chan []string, 1)
+	errChan := make(chan error, 1)
 
-	err := src.Watch(context.Background(), mgr, func(changedKeys []string, err error) {
+	err := src.Watch(context.Background(), mgr, func(changedKeys []string, watchErr error) {
 		changeChan <- changedKeys
+		if watchErr != nil {
+			errChan <- watchErr
+		}
 	})
 	require.NoError(t, err)
 
@@ -716,7 +720,16 @@ func TestMemoryConfigSource_WatchWithFailedSets(t *testing.T) {
 		t.Fatal("timeout waiting for watch notification")
 	}
 
+	select {
+	case watchErr := <-errChan:
+		assert.Error(t, watchErr)
+		assert.Contains(t, watchErr.Error(), "forced Set error")
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout waiting for watch error notification")
+	}
+
 	close(changeChan)
+	close(errChan)
 }
 
 // failingMockManager is a mock manager that fails on specific keys
