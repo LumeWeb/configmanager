@@ -32,6 +32,14 @@ func WithFlags(flags map[string][]string) ConfigOption {
 	}
 }
 
+// WithDescriptions is a ConfigOption that sets descriptions for configuration keys
+func WithDescriptions(descriptions map[string]string) ConfigOption {
+	return func(cm *ConfigManagerDefault) error {
+		cm.descriptionManager.SetDescriptions(descriptions)
+		return nil
+	}
+}
+
 // WithLogger configures the logger for the ConfigManagerDefault
 func WithLogger(logger *zap.Logger) ConfigOption {
 	return func(cm *ConfigManagerDefault) error {

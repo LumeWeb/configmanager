@@ -33,44 +33,46 @@ func (cm *ConfigManagerDefault) copy() *ConfigManagerDefault {
 	defer cm.configStructLock.RUnlock()
 
 	return &ConfigManagerDefault{
-		koanf:             kkoanf.New(cm.Delim()),
-		sources:           cm.sources,
-		loadedSources:     make(map[source.ConfigSource]bool), // Fresh map for copy
-		watchedSources:    make(map[source.ConfigSource]bool), // Fresh map for copy
-		logger:            cm.logger,
-		events:            cm.events,
-		flagManager:       cm.flagManager,
-		configStructs:     cm.configStructs,
-		configFile:        cm.configFile,
-		configDir:         cm.configDir,
-		tagName:           cm.tagName,
-		registry:          cm.registry,
-		syncConfigNS:      cm.syncConfigNS,
-		validationEnabled: cm.validationEnabled,
-		delimiter:         cm.delimiter,
+		koanf:              kkoanf.New(cm.Delim()),
+		sources:            cm.sources,
+		loadedSources:      make(map[source.ConfigSource]bool), // Fresh map for copy
+		watchedSources:     make(map[source.ConfigSource]bool), // Fresh map for copy
+		logger:             cm.logger,
+		events:             cm.events,
+		flagManager:        cm.flagManager,
+		descriptionManager: cm.descriptionManager,
+		configStructs:      cm.configStructs,
+		configFile:         cm.configFile,
+		configDir:          cm.configDir,
+		tagName:            cm.tagName,
+		registry:           cm.registry,
+		syncConfigNS:       cm.syncConfigNS,
+		validationEnabled:  cm.validationEnabled,
+		delimiter:          cm.delimiter,
 	}
 }
 
 // ConfigManagerDefault is the central point of interaction for accessing and managing configuration.
 type ConfigManagerDefault struct {
-	syncMgr           csync.Manager
-	koanf             *kkoanf.Koanf
-	sources           []source.ConfigSource
-	loadedSources     map[source.ConfigSource]bool // Track which sources have been loaded
-	watchedSources    map[source.ConfigSource]bool // Track which sources have watchers started
-	logger            *zap.Logger
-	validationEnabled bool
-	validationLock    sync.RWMutex
-	events            event.EventManager[csync.ConfigEvent]
-	flagManager       FlagManager
-	configStructs     map[string]reflect.Type
-	configStructLock  sync.RWMutex
-	configFile        string
-	configDir         string
-	tagName           string
-	registry          ConfigRegistry
-	syncConfigNS      string // Namespace for sync client configuration
-	delimiter         string // Custom delimiter for nested keys
+	syncMgr            csync.Manager
+	koanf              *kkoanf.Koanf
+	sources            []source.ConfigSource
+	loadedSources      map[source.ConfigSource]bool // Track which sources have been loaded
+	watchedSources     map[source.ConfigSource]bool // Track which sources have watchers started
+	logger             *zap.Logger
+	validationEnabled  bool
+	validationLock     sync.RWMutex
+	events             event.EventManager[csync.ConfigEvent]
+	flagManager        FlagManager
+	descriptionManager DescriptionManager
+	configStructs      map[string]reflect.Type
+	configStructLock   sync.RWMutex
+	configFile         string
+	configDir          string
+	tagName            string
+	registry           ConfigRegistry
+	syncConfigNS       string // Namespace for sync client configuration
+	delimiter          string // Custom delimiter for nested keys
 }
 
 // Ensure ConfigManagerDefault implements Manager interface
@@ -304,18 +306,19 @@ func NewConfigManager(sources any, opts ...ConfigOption) (*ConfigManagerDefault,
 	}
 
 	cm := &ConfigManagerDefault{
-		koanf:             k,
-		sources:           configSources,
-		loadedSources:     make(map[source.ConfigSource]bool),
-		watchedSources:    make(map[source.ConfigSource]bool),
-		logger:            zap.NewNop(), // Default no-op logger
-		events:            eventMgr,
-		flagManager:       NewFlagManager(),
-		configStructs:     make(map[string]reflect.Type),
-		tagName:           "config", // Default tag name
-		registry:          NewDefaultConfigRegistry(),
-		syncConfigNS:      "sync.config", // Default sync config namespace
-		validationEnabled: true,          // Validation enabled by default
+		koanf:              k,
+		sources:            configSources,
+		loadedSources:      make(map[source.ConfigSource]bool),
+		watchedSources:     make(map[source.ConfigSource]bool),
+		logger:             zap.NewNop(),
+		events:             eventMgr,
+		flagManager:        NewFlagManager(),
+		descriptionManager: NewDescriptionManager(),
+		configStructs:      make(map[string]reflect.Type),
+		tagName:            "config", // Default tag name
+		registry:           NewDefaultConfigRegistry(),
+		syncConfigNS:       "sync.config", // Default sync config namespace
+		validationEnabled:  true,          // Validation enabled by default
 	}
 
 	for _, opt := range opts {
@@ -534,7 +537,11 @@ func (cm *ConfigManagerDefault) Get(key string, target ...any) (any, any, error)
 
 	// Get raw value first
 	if !cm.koanf.Exists(fullKey) {
-		return nil, nil, fmt.Errorf("configuration key '%s' not found", fullKey)
+		errMsg := fmt.Sprintf("configuration key '%s' not found", fullKey)
+		if desc := cm.descriptionManager.GetDescription(fullKey); desc != "" {
+			errMsg += fmt.Sprintf(" (%s)", desc)
+		}
+		return nil, nil, fmt.Errorf("%s", errMsg)
 	}
 	raw := cm.koanf.Get(fullKey)
 
@@ -582,7 +589,55 @@ func (cm *ConfigManagerDefault) RegisterStruct(key string, cfg any) error {
 	}
 
 	cm.configStructs[key] = typ
+
+	// Extract descriptions from struct tags
+	cm.extractStructDescriptions(key, typ)
+
 	return nil
+}
+
+// extractStructDescriptions extracts descriptions from struct tags and registers them
+func (cm *ConfigManagerDefault) extractStructDescriptions(key string, typ reflect.Type) {
+	// Only process structs
+	if typ.Kind() != reflect.Struct {
+		return
+	}
+
+	// Iterate through struct fields
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+
+		// Skip unexported fields
+		if !field.IsExported() {
+			continue
+		}
+
+		// Get the config tag name
+		tagName := field.Tag.Get(cm.tagName)
+		if tagName == "" {
+			tagName = field.Name
+		}
+
+		// Build the full key path
+		fullKey := tagName
+		if key != "" {
+			fullKey = key + cm.Delim() + tagName
+		}
+
+		// Extract description tag
+		if desc := field.Tag.Get("desc"); desc != "" {
+			cm.descriptionManager.SetDescription(fullKey, desc)
+		}
+
+		// Recursively process nested structs
+		fieldType := field.Type
+		if fieldType.Kind() == reflect.Ptr {
+			fieldType = fieldType.Elem()
+		}
+		if fieldType.Kind() == reflect.Struct {
+			cm.extractStructDescriptions(fullKey, fieldType)
+		}
+	}
 }
 
 // getIntoStruct decodes configuration into a registered struct type (used by RegisterStruct)
@@ -976,7 +1031,11 @@ func (cm *ConfigManagerDefault) validateConfig(key string) error {
 
 	// First check if the key exists in the configuration
 	if !cm.Exists(key) {
-		return fmt.Errorf("configuration key '%s' not found", key)
+		errMsg := fmt.Sprintf("configuration key '%s' not found", key)
+		if desc := cm.descriptionManager.GetDescription(key); desc != "" {
+			errMsg += fmt.Sprintf(" (%s)", desc)
+		}
+		return fmt.Errorf("%s", errMsg)
 	}
 
 	// Check if we have a registered struct for this key
@@ -1228,6 +1287,36 @@ func (cm *ConfigManagerDefault) implementsConfigDefaults(key string) bool {
 // FlagManager returns the flag manager instance
 func (cm *ConfigManagerDefault) FlagManager() FlagManager {
 	return cm.flagManager
+}
+
+// DescriptionManager returns the description manager instance
+func (cm *ConfigManagerDefault) DescriptionManager() DescriptionManager {
+	return cm.descriptionManager
+}
+
+// GetDescription returns the description for a configuration key
+func (cm *ConfigManagerDefault) GetDescription(key string) string {
+	return cm.descriptionManager.GetDescription(key)
+}
+
+// GetAllDescriptions returns all configuration descriptions
+func (cm *ConfigManagerDefault) GetAllDescriptions() map[string]string {
+	return cm.descriptionManager.GetAllDescriptions()
+}
+
+// GetDescriptionsForPrefix returns all descriptions matching the given prefix
+func (cm *ConfigManagerDefault) GetDescriptionsForPrefix(prefix string) map[string]string {
+	return cm.descriptionManager.GetDescriptionsForPrefix(prefix)
+}
+
+// SetDescription sets a description for a configuration key at runtime
+func (cm *ConfigManagerDefault) SetDescription(key string, description string) {
+	cm.descriptionManager.SetDescription(key, description)
+}
+
+// SetDescriptions sets multiple descriptions at once
+func (cm *ConfigManagerDefault) SetDescriptions(descriptions map[string]string) {
+	cm.descriptionManager.SetDescriptions(descriptions)
 }
 
 // GetRegisteredStructs returns a copy of the registered config structs
