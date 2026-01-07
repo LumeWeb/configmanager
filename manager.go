@@ -62,6 +62,7 @@ type ConfigManagerDefault struct {
 	logger             *zap.Logger
 	validationEnabled  bool
 	validationLock     sync.RWMutex
+	setLock            sync.Mutex // Protects Set operations to ensure atomicity with sync
 	events             event.EventManager[csync.ConfigEvent]
 	flagManager        FlagManager
 	descriptionManager DescriptionManager
@@ -886,6 +887,9 @@ func (cm *ConfigManagerDefault) BulkSet(ctx context.Context, updates map[string]
 
 // setInternal is the internal implementation of setting a value with optional validation
 func (cm *ConfigManagerDefault) setInternal(ctx context.Context, key string, value any, validate bool) error {
+	cm.setLock.Lock()
+	defer cm.setLock.Unlock()
+
 	// Get the old value before updating
 	oldValue, _, _ := cm.Get(key)
 
@@ -936,10 +940,8 @@ func (cm *ConfigManagerDefault) setInternal(ctx context.Context, key string, val
 				zap.String("key", key),
 				zap.Any("oldValue", oldValue))
 			if oldValue == nil {
-				// Key didn't exist before, delete it
 				cm.koanf.Delete(key)
 			} else {
-				// Key existed before, restore its old value
 				_ = cm.koanf.Set(key, oldValue)
 			}
 			cm.logger.Error("failed to push config to sync manager after local set",
