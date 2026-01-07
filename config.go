@@ -36,6 +36,14 @@ type Manager interface {
 	// Flag management
 	FlagManager() FlagManager
 
+	// Description management
+	DescriptionManager() DescriptionManager
+	GetDescription(key string) string
+	GetAllDescriptions() map[string]string
+	GetDescriptionsForPrefix(prefix string) map[string]string
+	SetDescription(key string, description string)
+	SetDescriptions(descriptions map[string]string)
+
 	// Configuration access
 	Get(key string, target ...any) (any, any, error)
 	GetString(key string) (string, error)
