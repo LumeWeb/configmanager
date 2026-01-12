@@ -1,0 +1,5 @@
+---
+default: patch
+---
+
+# update dependencies
