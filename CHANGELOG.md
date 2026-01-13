@@ -1,3 +1,9 @@
+## 0.3.24 (2026-01-13)
+
+### Fixes
+
+- update dependencies
+
 ## 0.3.23 (2026-01-07)
 
 ### Features
