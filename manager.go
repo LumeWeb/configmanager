@@ -23,6 +23,7 @@ import (
 const (
 	schemaValidationRootPath = "$root"
 	keySeparator             = "."
+	ROOT_NS                  = ""
 )
 
 // copy creates a throwaway copy of the ConfigManagerDefault with a new Koanf instance.
@@ -1347,6 +1348,12 @@ func (cm *ConfigManagerDefault) GetRegisteredStructs() map[string]reflect.Type {
 // findNearestStructKey finds the nearest parent key that has a registered struct
 func (cm *ConfigManagerDefault) findNearestStructKey(key string) string {
 	parts := strings.Split(key, keySeparator)
+	
+	// If there's only one part (no delimiter), check for a root namespace struct
+	if len(parts) == 1 && cm.hasConfigStruct(ROOT_NS) {
+		return ROOT_NS
+	}
+	
 	for i := len(parts); i > 0; i-- {
 		potentialKey := strings.Join(parts[:i], keySeparator)
 		if cm.hasConfigStruct(potentialKey) {
@@ -1382,8 +1389,8 @@ func (cm *ConfigManagerDefault) Delete(key string) {
 
 // Delim returns the delimiter used for nested keys
 func (cm *ConfigManagerDefault) Root(target any) (any, error) {
-	if !cm.hasConfigStruct("") {
-		return nil, fmt.Errorf("no root configuration struct registered - use RegisterStruct(\"\", yourStruct{})")
+	if !cm.hasConfigStruct(ROOT_NS) {
+		return nil, fmt.Errorf("no root configuration struct registered - use RegisterStruct(ROOT_NS, yourStruct{})")
 	}
 	return cm.getIntoStruct("", target)
 }
