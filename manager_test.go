@@ -3,6 +3,8 @@ package configmanager
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"github.com/Oudwins/zog"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
@@ -2411,5 +2413,119 @@ func TestConfigManager_BulkSetAtomicInternal(t *testing.T) {
 		err = cm.bulkSetAtomicInternal(context.Background(), updates, true)
 		assert.NoError(t, err)
 		assert.Equal(t, 1, notifyCount)
+	})
+}
+
+func TestConfigManager_RootNamespacePersist(t *testing.T) {
+	// Create a temporary directory for test files
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	// Define a simple config struct for testing
+	type AppConfig struct {
+		Name     string `config:"name"`
+		Port     int    `config:"port"`
+		Enabled  bool   `config:"enabled"`
+	}
+
+	// First manager: Create, set values, and persist
+	t.Run("save config", func(t *testing.T) {
+		cm, err := NewConfigManager([]source.ConfigSource{})
+		require.NoError(t, err)
+
+		// Register file source with root namespace
+		fileSource := source.NewFileSource(configFile)
+		cm.RegisterSource(fileSource)
+		cm.RegisterNamespace(ROOT_NS, fileSource)
+
+		// Register config struct for root namespace
+		err = cm.RegisterStruct(ROOT_NS, &AppConfig{})
+		require.NoError(t, err)
+
+		// Set some values
+		err = cm.Set(context.Background(), "name", "test-app")
+		require.NoError(t, err)
+		err = cm.Set(context.Background(), "port", 8080)
+		require.NoError(t, err)
+		err = cm.Set(context.Background(), "enabled", true)
+		require.NoError(t, err)
+
+		// Verify values are set
+		val, _, err := cm.Get("name")
+		require.NoError(t, err)
+		assert.Equal(t, "test-app", val)
+
+		// Persist to file
+		err = cm.Persist()
+		require.NoError(t, err)
+
+		// Verify file exists
+		_, err = os.Stat(configFile)
+		require.NoError(t, err)
+	})
+
+	// Second manager: Load from file and verify values
+	t.Run("load config", func(t *testing.T) {
+		cm, err := NewConfigManager([]source.ConfigSource{})
+		require.NoError(t, err)
+
+		// Register file source with root namespace
+		fileSource := source.NewFileSource(configFile)
+		cm.RegisterSource(fileSource)
+		cm.RegisterNamespace(ROOT_NS, fileSource)
+
+		// Register config struct for root namespace
+		err = cm.RegisterStruct(ROOT_NS, &AppConfig{})
+		require.NoError(t, err)
+
+		// Load from file
+		err = cm.Load()
+		require.NoError(t, err)
+
+		// Verify loaded values
+		val, _, err := cm.Get("name")
+		require.NoError(t, err)
+		assert.Equal(t, "test-app", val)
+
+		val, _, err = cm.Get("port")
+		require.NoError(t, err)
+		assert.Equal(t, 8080, val)
+
+		val, _, err = cm.Get("enabled")
+		require.NoError(t, err)
+		assert.Equal(t, true, val)
+
+		// Verify findNearestStructKey returns ROOT_NS for single-part keys
+		structKey := cm.findNearestStructKey("name")
+		assert.Equal(t, ROOT_NS, structKey)
+
+		structKey = cm.findNearestStructKey("port")
+		assert.Equal(t, ROOT_NS, structKey)
+
+		structKey = cm.findNearestStructKey("enabled")
+		assert.Equal(t, ROOT_NS, structKey)
+	})
+
+	// Test validation with root namespace
+	t.Run("validate root namespace config", func(t *testing.T) {
+		cm, err := NewConfigManager([]source.ConfigSource{})
+		require.NoError(t, err)
+
+		// Register file source with root namespace
+		fileSource := source.NewFileSource(configFile)
+		cm.RegisterSource(fileSource)
+		cm.RegisterNamespace(ROOT_NS, fileSource)
+
+		// Register config struct for root namespace
+		err = cm.RegisterStruct(ROOT_NS, &AppConfig{})
+		require.NoError(t, err)
+
+		// Load from file
+		err = cm.Load()
+		require.NoError(t, err)
+
+		// Validate the entire config
+		err = cm.Validate()
+		require.NoError(t, err)
 	})
 }
