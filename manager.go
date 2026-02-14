@@ -537,15 +537,25 @@ func (cm *ConfigManagerDefault) Get(key string, target ...any) (any, any, error)
 		fullKey = key
 	}
 
+	// Special handling for root namespace (empty string) when a struct is registered
+	isRootStructRequest := fullKey == ROOT_NS && cm.hasConfigStruct(ROOT_NS)
+
 	// Get raw value first
-	if !cm.koanf.Exists(fullKey) {
+	if !isRootStructRequest && !cm.koanf.Exists(fullKey) {
 		errMsg := fmt.Sprintf("configuration key '%s' not found", fullKey)
 		if desc := cm.descriptionManager.GetDescription(fullKey); desc != "" {
 			errMsg += fmt.Sprintf(" (%s)", desc)
 		}
 		return nil, nil, fmt.Errorf("%s", errMsg)
 	}
-	raw := cm.koanf.Get(fullKey)
+
+	var raw any
+	if isRootStructRequest {
+		// For root struct requests, return the entire config as raw
+		raw = cm.koanf.All()
+	} else {
+		raw = cm.koanf.Get(fullKey)
+	}
 
 	// Handle struct decoding cases
 	switch {
@@ -652,21 +662,31 @@ func (cm *ConfigManagerDefault) getIntoStruct(key string, target any) (any, erro
 	structType := cm.configStructs[key]
 	cm.configStructLock.RUnlock()
 
-	// Create new instance if target is nil
+	// Create new instance if target is nil or if target is a nil pointer
 	var cfg any
 	if target == nil {
 		// Always create pointer to registered value type
 		cfg = reflect.New(structType).Interface()
 	} else {
 		targetType := reflect.TypeOf(target)
-		// Dereference pointer target to match registered value type
-		if targetType.Kind() == reflect.Ptr {
-			targetType = targetType.Elem()
-			if targetType != structType {
-				return nil, fmt.Errorf("target type %v does not match registered type %v",
-					targetType, structType)
+		// Check if target is a nil pointer (e.g., (*Config)(nil))
+		if targetType == nil {
+			// target is the nil interface, create new instance
+			cfg = reflect.New(structType).Interface()
+		} else if targetType.Kind() == reflect.Ptr {
+			// Check if pointer is nil
+			if reflect.ValueOf(target).IsNil() {
+				// Nil pointer, create new instance
+				cfg = reflect.New(structType).Interface()
+			} else {
+				// Non-nil pointer, use it as target
+				targetType = targetType.Elem()
+				if targetType != structType {
+					return nil, fmt.Errorf("target type %v does not match registered type %v",
+						targetType, structType)
+				}
+				cfg = target
 			}
-			cfg = target
 		} else {
 			// For value target, must match registered type exactly
 			if targetType != structType {
@@ -722,6 +742,7 @@ func (cm *ConfigManagerDefault) getIntoStruct(key string, target any) (any, erro
 
 	// Get all config data under the key prefix
 	data := cm.koanf.Cut(key).Raw()
+
 	if len(data) == 0 {
 		return nil, fmt.Errorf("no data found for key %s", key)
 	}
