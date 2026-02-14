@@ -596,6 +596,11 @@ func TestFileSource_Persist(t *testing.T) {
 	})
 
 	t.Run("error creating temp file", func(t *testing.T) {
+		// Skip this test when running as root since root can create files in read-only directories
+		if os.Geteuid() == 0 {
+			t.Skip("skipping permission test when running as root")
+		}
+
 		// Create a read-only directory
 		tmpDir, err := os.MkdirTemp("", "testdir")
 		require.NoError(t, err)
