@@ -2529,3 +2529,163 @@ func TestConfigManager_RootNamespacePersist(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+// TestRootNamespaceDebug traces the root namespace behavior
+func TestRootNamespaceDebug(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	// Create a logger that outputs to stdout
+	logger := zap.NewExample()
+
+	// Define a simple config struct
+	type AppConfig struct {
+		Name  string `config:"name"`
+		Port  int    `config:"port"`
+		Token string `config:"token"`
+	}
+
+	// Create manager with file source at ROOT_NS
+	fileSource := source.NewFileSource(configPath)
+	cm, err := NewConfigManager([]source.ConfigSource{fileSource}, WithLogger(logger))
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	// Register file source at ROOT_NS
+	cm.RegisterNamespace(ROOT_NS, fileSource)
+
+	// Register struct at ROOT_NS
+	if err := cm.RegisterStruct(ROOT_NS, &AppConfig{}); err != nil {
+		t.Fatalf("Failed to register struct: %v", err)
+	}
+
+	t.Log("=== Setting token ===")
+	// Set a token
+	if err := cm.Set(nil, "token", "test-token-123"); err != nil {
+		t.Fatalf("Failed to set token: %v", err)
+	}
+
+	t.Log("=== Persisting ===")
+	// Persist to file
+	if err := cm.Persist(); err != nil {
+		t.Fatalf("Failed to persist: %v", err)
+	}
+
+	t.Log("=== Checking file contents ===")
+	// Check file contents
+	fileData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+	t.Logf("File contents:\n%s", string(fileData))
+
+	t.Log("=== Creating new manager ===")
+	// Create a new manager to load from file
+	fileSource2 := source.NewFileSource(configPath)
+	cm2, err := NewConfigManager([]source.ConfigSource{fileSource2}, WithLogger(logger))
+	if err != nil {
+		t.Fatalf("Failed to create new manager: %v", err)
+	}
+
+	cm2.RegisterNamespace(ROOT_NS, fileSource2)
+	if err := cm2.RegisterStruct(ROOT_NS, &AppConfig{}); err != nil {
+		t.Fatalf("Failed to register struct in new manager: %v", err)
+	}
+
+	t.Log("=== Loading ===")
+	// Load from file
+	if err := cm2.Load(); err != nil {
+		t.Fatalf("Failed to load: %v", err)
+	}
+
+	t.Log("=== Getting all keys ===")
+	// Check what keys are loaded
+	allKeys := cm2.Keys()
+	t.Logf("All keys after load: %v", allKeys)
+
+	t.Log("=== Getting ROOT_NS ===")
+	// Get the root namespace struct
+	_, _, err = cm2.Get(ROOT_NS)
+	if err != nil {
+		t.Fatalf("Failed to get ROOT_NS: %v", err)
+	}
+
+	t.Log("=== Getting token ===")
+	// Get token value
+	token, err := cm2.GetString("token")
+	if err != nil {
+		t.Fatalf("Failed to get token: %v", err)
+	}
+
+	t.Logf("Token value: %s", token)
+	if token != "test-token-123" {
+		t.Errorf("Expected token 'test-token-123', got '%s'", token)
+	}
+}
+
+// TestPinnerStyleGetRootNS tests the pattern used by pinner-cli
+func TestPinnerStyleGetRootNS(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	logger := zap.NewExample()
+
+	type Config struct {
+		AuthToken string `config:"auth_token"`
+	}
+
+	// Create first manager
+	fileSource1 := source.NewFileSource(configPath)
+	cm1, err := NewConfigManager([]source.ConfigSource{fileSource1}, WithLogger(logger))
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	cm1.RegisterNamespace(ROOT_NS, fileSource1)
+	cm1.RegisterStruct(ROOT_NS, (*Config)(nil))
+
+	// Set auth token
+	if err := cm1.Set(nil, "auth_token", "test-token-123"); err != nil {
+		t.Fatalf("Failed to set token: %v", err)
+	}
+	if err := cm1.Persist(); err != nil {
+		t.Fatalf("Failed to persist: %v", err)
+	}
+
+	// Read file
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+	t.Logf("File contents:\n%s", string(data))
+
+	// Create second manager
+	fileSource2 := source.NewFileSource(configPath)
+	cm2, err := NewConfigManager([]source.ConfigSource{fileSource2}, WithLogger(logger))
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	cm2.RegisterNamespace(ROOT_NS, fileSource2)
+	cm2.RegisterStruct(ROOT_NS, (*Config)(nil))
+
+	// Load
+	if err := cm2.Load(); err != nil {
+		t.Fatalf("Failed to load: %v", err)
+	}
+
+	// Get config - this is how pinner-cli does it (passing nil pointer)
+	var cfg *Config
+	_, decoded, err := cm2.Get(ROOT_NS, cfg)
+	t.Logf("Get result: decoded=%v, err=%v", decoded, err)
+	if decoded == nil {
+		t.Error("decoded is nil after Get(ROOT_NS, nil *Config)")
+	} else {
+		if cfgPtr, ok := decoded.(*Config); ok {
+			t.Logf("Config AuthToken: %s", cfgPtr.AuthToken)
+			if cfgPtr.AuthToken != "test-token-123" {
+				t.Errorf("Expected token 'test-token-123', got '%s'", cfgPtr.AuthToken)
+			}
+		} else {
+			t.Errorf("decoded is not *Config, got %T", decoded)
+		}
+	}
+}
