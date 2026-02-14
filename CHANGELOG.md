@@ -1,3 +1,9 @@
+## 0.3.25 (2026-02-14)
+
+### Features
+
+- add ROOT_NS constant and lookup logic
+
 ## 0.3.24 (2026-01-13)
 
 ### Fixes
