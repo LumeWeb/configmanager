@@ -1,3 +1,9 @@
+## 0.3.26 (2026-02-14)
+
+### Fixes
+
+- handle nil pointer targets and root namespace struct requests
+
 ## 0.3.25 (2026-02-14)
 
 ### Features
