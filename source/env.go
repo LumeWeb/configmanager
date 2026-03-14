@@ -14,7 +14,7 @@ type ArrayStrategy int
 
 const (
 	// ArrayStrategyAuto automatically detects the best parsing strategy.
-	// Tries in order: index-based → delimited (comma, space) → JSON arrays.
+	// Tries in order: index-based → JSON arrays → delimited (comma).
 	ArrayStrategyAuto ArrayStrategy = iota
 
 	// ArrayStrategyIndex uses index-based environment variables (APP_KEY_0, APP_KEY_1).
@@ -31,8 +31,8 @@ const (
 )
 
 // commonDelimiters are the standard delimiters for array parsing.
-// Note: colon ":" is excluded to avoid false positives with URLs and IP addresses.
-var commonDelimiters = []string{",", " ", "|", ";"}
+// Note: colon ":" and space " " are excluded to avoid false positives with URLs, IP addresses, and multi-word strings.
+var commonDelimiters = []string{",", "|", ";"}
 
 // EnvConfigSource loads configuration from environment variables.
 type EnvConfigSource struct {
