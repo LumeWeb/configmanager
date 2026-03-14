@@ -1,3 +1,13 @@
+## 0.3.27 (2026-03-14)
+
+### Features
+
+- add array parsing support for environment variables
+
+### Fixes
+
+- address PR review feedback for array parsing
+
 ## 0.3.26 (2026-02-14)
 
 ### Fixes
