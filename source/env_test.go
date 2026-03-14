@@ -585,7 +585,7 @@ func TestEnvConfigSource_ArrayParsing_JSONStrategy(t *testing.T) {
 			envVars: map[string]string{
 				"APP_VALUE": "just,a,string",
 			},
-			expectedKey: "hosts",
+			expectedKey: "value",
 			expectedVal: nil, // Should remain as string
 		},
 	}
@@ -614,7 +614,7 @@ func TestEnvConfigSource_ArrayParsing_JSONStrategy(t *testing.T) {
 				assert.Equal(t, tt.expectedVal, val)
 			} else {
 				// Should not be parsed as array
-				val, _, err := mgr.Get("value")
+				val, _, err := mgr.Get(tt.expectedKey)
 				assert.NoError(t, err)
 				assert.IsType(t, "", val) // Should be string
 			}

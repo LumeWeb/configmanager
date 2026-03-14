@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -28,6 +29,10 @@ const (
 	// Example: '["value1","value2"]' → []string{"value1", "value2"}
 	ArrayStrategyJSON
 )
+
+// commonDelimiters are the standard delimiters for array parsing.
+// Note: colon ":" is excluded to avoid false positives with URLs and IP addresses.
+var commonDelimiters = []string{",", " ", "|", ";"}
 
 // EnvConfigSource loads configuration from environment variables.
 type EnvConfigSource struct {
@@ -226,10 +231,9 @@ func (e *EnvConfigSource) tryParseDelimitedArray(value string) ([]string, bool) 
 	}
 
 	// Try configured delimiter first, then common alternatives
-	// Note: colon ":" is excluded as it causes false positives with URLs and IP addresses
-	delimiters := []string{",", " ", "|", ";"}
+	delimiters := commonDelimiters
 
-	// Insert configured delimiter first if not empty and different from defaults
+	// Insert configured delimiter first if not empty
 	if e.arrayDelimiter != "" {
 		delimiters = append([]string{e.arrayDelimiter}, delimiters...)
 	}
@@ -256,26 +260,23 @@ func (e *EnvConfigSource) tryParseJSONArray(value string) ([]string, bool) {
 		return nil, false
 	}
 
-	content := value[1 : len(value)-1]
-	if content == "" {
-		return []string{}, true
+	// Use proper JSON parsing to handle commas within strings correctly
+	var parsed []any
+	if err := json.Unmarshal([]byte(value), &parsed); err != nil {
+		return nil, false
 	}
 
-	parts := strings.Split(content, ",")
-	result := make([]string, 0, len(parts))
-
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if unquoted, err := strconv.Unquote(part); err == nil {
-			result = append(result, unquoted)
+	result := make([]string, 0, len(parsed))
+	for _, item := range parsed {
+		if str, ok := item.(string); ok {
+			result = append(result, str)
+		} else {
+			// Non-string elements are converted to strings
+			result = append(result, fmt.Sprintf("%v", item))
 		}
 	}
 
-	if len(result) > 0 {
-		return result, true
-	}
-
-	return nil, false
+	return result, true
 }
 
 // isJSONArray checks if a string looks like a JSON array.
@@ -307,7 +308,13 @@ func (e *EnvConfigSource) mergeIndexBasedArrays(envValues map[string]string, tra
 	for baseKey, indexMap := range groups {
 		if array := e.indexMapToArray(indexMap); array != nil {
 			if transformedKey, ok := e.transformKey(baseKey, transform); ok {
-				result[transformedKey] = array
+				// Apply transform to each array element
+				transformedValues := make([]any, len(array))
+				for i, val := range array {
+					_, transformedVal := transform(baseKey, val)
+					transformedValues[i] = transformedVal
+				}
+				result[transformedKey] = coalesceType[string](transformedValues)
 			}
 		}
 	}
@@ -388,4 +395,26 @@ func (e *EnvConfigSource) indexMapToArray(indexMap map[int]string) []string {
 func (e *EnvConfigSource) transformKey(key string, transform func(k, v string) (string, any)) (string, bool) {
 	transformedKey, _ := transform(key, "")
 	return transformedKey, transformedKey != ""
+}
+
+// coalesceType converts a []any slice to a concrete []T if all elements are type T,
+// otherwise returns the original slice unchanged. This helper uses generics to preserve
+// type information when possible, returning concrete types for type consistency.
+func coalesceType[T any](values []any) any {
+	if len(values) == 0 {
+		return values
+	}
+
+	for _, val := range values {
+		if _, ok := val.(T); !ok {
+			return values // Contains non-T elements
+		}
+	}
+
+	// All elements are T - convert to []T
+	result := make([]T, len(values))
+	for i, val := range values {
+		result[i] = val.(T)
+	}
+	return result
 }
