@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/stretchr/testify/require"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -358,3 +359,515 @@ func TestEnvConfigSource_Watch(t *testing.T) {
 	})
 	assert.NoError(t, err, "Watch should return nil and be a no-op")
 }
+
+func TestEnvConfigSource_ArrayParsing_AutoStrategy(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		envVars     map[string]string
+		expectedKey string
+		expectedVal any
+		setupFunc   func()
+		cleanupFunc func()
+	}{
+		{
+			name: "JSON array in env var",
+			envVars: map[string]string{
+				"APP_HOSTS": `["node1","node2","node3"]`,
+			},
+			expectedKey: "hosts",
+			expectedVal: []string{"node1", "node2", "node3"},
+		},
+		{
+			name: "comma-delimited array",
+			envVars: map[string]string{
+				"APP_TAGS": "web,api,database",
+			},
+			expectedKey: "tags",
+			expectedVal: []string{"web", "api", "database"},
+		},
+		{
+			name: "empty JSON array",
+			envVars: map[string]string{
+				"APP_EMPTY": `[]`,
+			},
+			expectedKey: "empty",
+			expectedVal: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				os.Setenv(k, v)
+			}
+			defer func() {
+				for k := range tt.envVars {
+					os.Unsetenv(k)
+				}
+			}()
+
+			mgr := newMockManager(".")
+			source := NewEnvConfigSource("APP_", "_", WithEnvSourceArrayStrategy(ArrayStrategyAuto, ""))
+
+			err := source.Load(ctx, mgr)
+			assert.NoError(t, err)
+
+			val, _, err := mgr.Get(tt.expectedKey)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedVal, val)
+		})
+	}
+}
+
+func TestEnvConfigSource_ArrayParsing_IndexStrategy(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		envVars     map[string]string
+		expectedKey string
+		expectedVal []string
+	}{
+		{
+			name: "index-based host list",
+			envVars: map[string]string{
+				"APP_HOSTS_0": "node1",
+				"APP_HOSTS_1": "node2",
+				"APP_HOSTS_2": "node3",
+			},
+			expectedKey: "hosts",
+			expectedVal: []string{"node1", "node2", "node3"},
+		},
+		{
+			name: "single index-based value",
+			envVars: map[string]string{
+				"APP_NAME_0": "myapp",
+			},
+			expectedKey: "name",
+			expectedVal: []string{"myapp"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				os.Setenv(k, v)
+			}
+			defer func() {
+				for k := range tt.envVars {
+					os.Unsetenv(k)
+				}
+			}()
+
+			mgr := newMockManager(".")
+			source := NewEnvConfigSource("APP_", "_", WithEnvSourceArrayStrategy(ArrayStrategyIndex, ""))
+
+			err := source.Load(ctx, mgr)
+			assert.NoError(t, err)
+
+			val, _, err := mgr.Get(tt.expectedKey)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedVal, val)
+		})
+	}
+}
+
+func TestEnvConfigSource_ArrayParsing_DelimitedStrategy(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		envVars     map[string]string
+		delimiter   string
+		expectedKey string
+		expectedVal []string
+	}{
+		{
+			name: "comma-delimited",
+			envVars: map[string]string{
+				"APP_TAGS": "web,api,database",
+			},
+			delimiter:   ",",
+			expectedKey: "tags",
+			expectedVal: []string{"web", "api", "database"},
+		},
+		{
+			name: "space-delimited",
+			envVars: map[string]string{
+				"APP_REGIONS": "us-east us-west eu-west",
+			},
+			delimiter:   " ",
+			expectedKey: "regions",
+			expectedVal: []string{"us-east", "us-west", "eu-west"},
+		},
+		{
+			name: "pipe-delimited",
+			envVars: map[string]string{
+				"APP_PATHS": "/var|/tmp|/opt",
+			},
+			delimiter:   "|",
+			expectedKey: "paths",
+			expectedVal: []string{"/var", "/tmp", "/opt"},
+		},
+		{
+			name: "semicolon-delimited",
+			envVars: map[string]string{
+				"APP_ORIGINS": "http://a.com;https://b.com",
+			},
+			delimiter:   ";",
+			expectedKey: "origins",
+			expectedVal: []string{"http://a.com", "https://b.com"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				os.Setenv(k, v)
+			}
+			defer func() {
+				for k := range tt.envVars {
+					os.Unsetenv(k)
+				}
+			}()
+
+			mgr := newMockManager(".")
+			source := NewEnvConfigSource("APP_", "_",
+				WithEnvSourceArrayStrategy(ArrayStrategyDelimited, tt.delimiter))
+
+			err := source.Load(ctx, mgr)
+			assert.NoError(t, err)
+
+			val, _, err := mgr.Get(tt.expectedKey)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedVal, val)
+		})
+	}
+}
+
+func TestEnvConfigSource_ArrayParsing_JSONStrategy(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		envVars     map[string]string
+		expectedKey string
+		expectedVal []string
+	}{
+		{
+			name: "simple JSON array",
+			envVars: map[string]string{
+				"APP_HOSTS": `["host1","host2"]`,
+			},
+			expectedKey: "hosts",
+			expectedVal: []string{"host1", "host2"},
+		},
+		{
+			name: "JSON array with spaces",
+			envVars: map[string]string{
+				"APP_LIST": `["a", "b", "c"]`,
+			},
+			expectedKey: "list",
+			expectedVal: []string{"a", "b", "c"},
+		},
+		{
+			name: "empty JSON array",
+			envVars: map[string]string{
+				"APP_EMPTY": `[]`,
+			},
+			expectedKey: "empty",
+			expectedVal: []string{},
+		},
+		{
+			name: "non-JSON should not parse",
+			envVars: map[string]string{
+				"APP_VALUE": "just,a,string",
+			},
+			expectedKey: "value",
+			expectedVal: nil, // Should remain as string
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				os.Setenv(k, v)
+			}
+			defer func() {
+				for k := range tt.envVars {
+					os.Unsetenv(k)
+				}
+			}()
+
+			mgr := newMockManager(".")
+			source := NewEnvConfigSource("APP_", "_",
+				WithEnvSourceArrayStrategy(ArrayStrategyJSON, ""))
+
+			err := source.Load(ctx, mgr)
+			assert.NoError(t, err)
+
+			if tt.expectedVal != nil {
+				val, _, err := mgr.Get(tt.expectedKey)
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedVal, val)
+			} else {
+				// Should not be parsed as array
+				val, _, err := mgr.Get(tt.expectedKey)
+				assert.NoError(t, err)
+				assert.IsType(t, "", val) // Should be string
+			}
+		})
+	}
+}
+
+func TestEnvConfigSource_ArrayParsing_EdgeCases(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		envVars       map[string]string
+		strategy      ArrayStrategy
+		delimiter     string
+		expectedKey   string
+		expectedVal   any
+		shouldConvert bool
+	}{
+		{
+			name: "single value should not be array",
+			envVars: map[string]string{
+				"APP_HOST": "localhost",
+			},
+			strategy:      ArrayStrategyAuto,
+			delimiter:     ",",
+			expectedKey:   "host",
+			expectedVal:   "localhost",
+			shouldConvert: false,
+		},
+		{
+			name: "empty string should not be array",
+			envVars: map[string]string{
+				"APP_HOST": "",
+			},
+			strategy:      ArrayStrategyAuto,
+			delimiter:     ",",
+			expectedKey:   "host",
+			expectedVal:   "",
+			shouldConvert: false,
+		},
+		{
+			name: "gap in index-based parsing should fail silently",
+			envVars: map[string]string{
+				"APP_HOSTS_0": "node1",
+				"APP_HOSTS_2": "node3", // Gap at index 1
+			},
+			strategy:      ArrayStrategyAuto,
+			delimiter:     ",",
+			expectedKey:   "", // Array shouldn't be created due to gap
+			expectedVal:   nil,
+			shouldConvert: false,
+		},
+		{
+			name: "URL with colon should not parse as array",
+			envVars: map[string]string{
+				"APP_URL": "https://localhost:8080",
+			},
+			strategy:      ArrayStrategyAuto,
+			delimiter:     ",",
+			expectedKey:   "url",
+			expectedVal:   "https://localhost:8080",
+			shouldConvert: false,
+		},
+		{
+			name: "IP address with colons should not parse",
+			envVars: map[string]string{
+				"APP_IP": "2001:db8::1",
+			},
+			strategy:      ArrayStrategyAuto,
+			delimiter:     ",",
+			expectedKey:   "ip",
+			expectedVal:   "2001:db8::1",
+			shouldConvert: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				os.Setenv(k, v)
+			}
+			defer func() {
+				for k := range tt.envVars {
+					os.Unsetenv(k)
+				}
+			}()
+
+			mgr := newMockManager(".")
+			source := NewEnvConfigSource("APP_", "_",
+				WithEnvSourceArrayStrategy(tt.strategy, tt.delimiter))
+
+			err := source.Load(ctx, mgr)
+			assert.NoError(t, err)
+
+			if tt.expectedKey == "" {
+				// Expected no value (e.g., gap in indices)
+				return
+			}
+
+			if tt.shouldConvert {
+				if arr, ok := tt.expectedVal.([]string); ok {
+					val, _, err := mgr.Get(tt.expectedKey)
+					assert.NoError(t, err)
+					assert.Equal(t, arr, val)
+				}
+			} else {
+				val, _, err := mgr.Get(tt.expectedKey)
+				assert.NoError(t, err)
+				assert.IsType(t, "", val, "Should remain as string")
+				assert.Equal(t, tt.expectedVal, val)
+			}
+		})
+	}
+}
+
+func TestEnvConfigSource_WithEnvEnvironFunc(t *testing.T) {
+	ctx := context.Background()
+
+	// Custom environment for testing
+	customEnv := []string{
+		"APP_HOST=localhost",
+		"APP_PORT=8080",
+	}
+
+	mgr := newMockManager(".")
+	source := NewEnvConfigSource("APP_", "_",
+		WithEnvEnvironFunc(func() []string {
+			return customEnv
+		}))
+
+	err := source.Load(ctx, mgr)
+	assert.NoError(t, err)
+
+	host, _, err := mgr.Get("host")
+	assert.NoError(t, err)
+	assert.Equal(t, "localhost", host)
+}
+
+func TestEnvConfigSource_WithEnvTransformFunc(t *testing.T) {
+	ctx := context.Background()
+
+	os.Setenv("APP_HOST", "localhost")
+	defer os.Unsetenv("APP_HOST")
+
+	mgr := newMockManager(",")
+	source := NewEnvConfigSource("APP_", "_",
+		WithEnvTransformFunc(func(k, v string) (string, any) {
+			// Custom transform that adds "custom_" prefix to all values
+			k = strings.ToLower(strings.TrimPrefix(k, "APP_"))
+			return k, "custom_" + v
+		}))
+
+	err := source.Load(ctx, mgr)
+	assert.NoError(t, err)
+
+	host, _, err := mgr.Get("host")
+	assert.NoError(t, err)
+	assert.Equal(t, "custom_localhost", host)
+}
+
+func TestEnvConfigSource_CombinedParsing(t *testing.T) {
+	ctx := context.Background()
+
+	// Test that regular env vars and index-based arrays work together
+	envVars := map[string]string{
+		"APP_NAME":       "myapp",
+		"APP_PORT":       "8080",
+		"APP_HOSTS_0":    "node1",
+		"APP_HOSTS_1":    "node2",
+		"APP_HOSTS_2":    "node3",
+		"APP_FEATURES_0": "auth",
+		"APP_FEATURES_1": "logging",
+	}
+
+	for k, v := range envVars {
+		os.Setenv(k, v)
+	}
+	defer func() {
+		for k := range envVars {
+			os.Unsetenv(k)
+		}
+	}()
+
+	mgr := newMockManager(".")
+	source := NewEnvConfigSource("APP_", "_",
+		WithEnvSourceArrayStrategy(ArrayStrategyAuto, ""))
+
+	err := source.Load(ctx, mgr)
+	assert.NoError(t, err)
+
+	// Check regular values
+	name, _, err := mgr.Get("name")
+	assert.NoError(t, err)
+	assert.Equal(t, "myapp", name)
+
+	port, _, err := mgr.Get("port")
+	assert.NoError(t, err)
+	assert.Equal(t, "8080", port)
+
+	// Check arrays
+	hosts, _, err := mgr.Get("hosts")
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"node1", "node2", "node3"}, hosts)
+
+	features, _, err := mgr.Get("features")
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"auth", "logging"}, features)
+}
+
+func TestEnvConfigSource_ArrayParsing_ComplexJson(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		input       string
+		isParsed    bool
+	}{
+		{
+			name:     "Malformed JSON should not parse as array",
+			input:    `["unclosed}`,
+			isParsed: false,
+		},
+		{
+			name:     "JSON without quotes should not parse",
+			input:    `[a,b,c]`,
+			isParsed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Setenv("APP_TEST", tt.input)
+			defer os.Unsetenv("APP_TEST")
+
+			mgr := newMockManager(".")
+			source := NewEnvConfigSource("APP_", "_",
+				WithEnvSourceArrayStrategy(ArrayStrategyJSON, ""))
+
+			err := source.Load(ctx, mgr)
+			assert.NoError(t, err)
+
+			val, _, err := mgr.Get("test")
+			assert.NoError(t, err)
+
+			if !tt.isParsed {
+				// When JSON parsing fails, value remains as original string
+				assert.IsType(t, "", val)
+			} else {
+				// Should have parsed as array
+				assert.IsType(t, []string{}, val)
+			}
+		})
+	}
+}
+
