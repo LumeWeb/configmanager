@@ -2551,6 +2551,7 @@ func TestRootNamespaceDebug(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
+	defer cm.Shutdown()
 
 	// Register file source at ROOT_NS
 	cm.RegisterNamespace(ROOT_NS, fileSource)
@@ -2587,6 +2588,7 @@ func TestRootNamespaceDebug(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create new manager: %v", err)
 	}
+	defer cm2.Shutdown()
 
 	cm2.RegisterNamespace(ROOT_NS, fileSource2)
 	if err := cm2.RegisterStruct(ROOT_NS, &AppConfig{}); err != nil {
@@ -2640,6 +2642,7 @@ func TestPinnerStyleGetRootNS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
+	defer cm1.Shutdown()
 	cm1.RegisterNamespace(ROOT_NS, fileSource1)
 	cm1.RegisterStruct(ROOT_NS, (*Config)(nil))
 
@@ -2664,6 +2667,7 @@ func TestPinnerStyleGetRootNS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
+	defer cm2.Shutdown()
 	cm2.RegisterNamespace(ROOT_NS, fileSource2)
 	cm2.RegisterStruct(ROOT_NS, (*Config)(nil))
 
