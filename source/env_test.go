@@ -395,6 +395,14 @@ func TestEnvConfigSource_ArrayParsing_AutoStrategy(t *testing.T) {
 			expectedKey: "empty",
 			expectedVal: []string{},
 		},
+		{
+			name: "bip seed with spaces should not parse as array",
+			envVars: map[string]string{
+				"APP_SEED": "abandon amount liar amount expire adjust cage candy arch gather drum buyer",
+			},
+			expectedKey: "seed",
+			expectedVal: "abandon amount liar amount expire adjust cage candy arch gather drum buyer",
+		},
 	}
 
 	for _, tt := range tests {
