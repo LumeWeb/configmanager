@@ -1,3 +1,9 @@
+## 0.3.28 (2026-03-15)
+
+### Fixes
+
+- prevent space delimiter from splitting multi-word strings
+
 ## 0.3.27 (2026-03-14)
 
 ### Features
