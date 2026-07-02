@@ -408,8 +408,12 @@ func (cm *ConfigManagerDefault) loadSource(src source.ConfigSource) error {
 
 // loadSources is the common implementation for loading sources.
 // If onlyNew is true, only sources that haven't been loaded before will be processed.
-// If onlyNew is false, all sources will be processed.
-func (cm *ConfigManagerDefault) loadSources(onlyNew bool) error {
+// loadSources is the common implementation for loading sources. If watch is
+// true, each source is also watched after loading (the default behavior).
+// When watch is false, only loading is performed — callers must start
+// watching separately (e.g. via StartWatching or LoadSource with watch=true)
+// if they need live config change notifications.
+func (cm *ConfigManagerDefault) loadSources(onlyNew bool, watch bool) error {
 	// Disable validation during initial load to avoid validation errors
 	// from partially loaded configurations
 	cm.DisableValidation()
@@ -428,18 +432,8 @@ func (cm *ConfigManagerDefault) loadSources(onlyNew bool) error {
 		// Mark this source as loaded
 		cm.loadedSources[src] = true
 
-		// Start watching if supported and not already watching
-		if !cm.watchedSources[src] {
-			if err := src.Watch(context.Background(), cm, func(changedKeys []string, err error) {
-				cm.handleConfigChanges(src, changedKeys)
-			}); err != nil {
-				cm.logger.Warn("failed to start config watcher",
-					zap.String("source", fmt.Sprintf("%T", src)),
-					zap.Error(err))
-			} else {
-				// Mark as watched only if Watch() succeeded
-				cm.watchedSources[src] = true
-			}
+		if watch {
+			cm.startWatching(src)
 		}
 	}
 
@@ -451,16 +445,53 @@ func (cm *ConfigManagerDefault) loadSources(onlyNew bool) error {
 	return nil
 }
 
-// Load loads configuration from only new sources that haven't been loaded before.
-// This method is atomic and will not reload sources that have already been processed.
-func (cm *ConfigManagerDefault) Load() error {
-	return cm.loadSources(true)
+// startWatching starts watching a source if it isn't already watched.
+// Watch errors are logged as warnings and do not fail the operation.
+func (cm *ConfigManagerDefault) startWatching(src source.ConfigSource) {
+	if cm.watchedSources[src] {
+		return
+	}
+	if err := src.Watch(context.Background(), cm, func(changedKeys []string, err error) {
+		cm.handleConfigChanges(src, changedKeys)
+	}); err != nil {
+		cm.logger.Warn("failed to start config watcher",
+			zap.String("source", fmt.Sprintf("%T", src)),
+			zap.Error(err))
+		return
+	}
+	cm.watchedSources[src] = true
 }
 
-// LoadAll loads configuration from all configured sources, processing everything again.
+// StartWatching starts watching all registered sources that have been loaded
+// but not yet watched. This is useful when sources were loaded without
+// watching (e.g. via LoadWithoutWatch) and the caller wants to activate
+// change notifications after initialization is complete.
+func (cm *ConfigManagerDefault) StartWatching() {
+	for _, src := range cm.sources {
+		cm.startWatching(src)
+	}
+}
+
+// Load loads configuration from only new sources that haven't been loaded before.
+// This method is atomic and will not reload sources that have already been processed.
+// Sources are also watched for changes after loading.
+func (cm *ConfigManagerDefault) Load() error {
+	return cm.loadSources(true, true)
+}
+
+// LoadWithoutWatch loads configuration from only new sources without starting
+// file watchers. Call StartWatching() after initialization is complete to
+// activate change notifications. This prevents spurious config change events
+// from writes that happen during initialization (e.g. persisting defaults).
+func (cm *ConfigManagerDefault) LoadWithoutWatch() error {
+	return cm.loadSources(true, false)
+}
+
+// LoadAll loads configuration from all sources, processing everything again.
 // This method reloads all sources regardless of whether they were loaded before.
+// Sources are also watched for changes after loading.
 func (cm *ConfigManagerDefault) LoadAll() error {
-	return cm.loadSources(false)
+	return cm.loadSources(false, true)
 }
 
 // GetString returns the string value for the given key.
@@ -1369,12 +1400,12 @@ func (cm *ConfigManagerDefault) GetRegisteredStructs() map[string]reflect.Type {
 // findNearestStructKey finds the nearest parent key that has a registered struct
 func (cm *ConfigManagerDefault) findNearestStructKey(key string) string {
 	parts := strings.Split(key, keySeparator)
-	
+
 	// If there's only one part (no delimiter), check for a root namespace struct
 	if len(parts) == 1 && cm.hasConfigStruct(ROOT_NS) {
 		return ROOT_NS
 	}
-	
+
 	for i := len(parts); i > 0; i-- {
 		potentialKey := strings.Join(parts[:i], keySeparator)
 		if cm.hasConfigStruct(potentialKey) {

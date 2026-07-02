@@ -3,11 +3,11 @@ package configmanager
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"github.com/Oudwins/zog"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -837,6 +837,37 @@ func TestConfigManager_implementsInterface(t *testing.T) {
 
 	validatorType := reflect.TypeOf((*Validator)(nil)).Elem()
 	assert.False(t, cm.implementsInterface("test", validatorType))
+}
+
+func TestConfigManager_LoadWithoutWatch(t *testing.T) {
+	// Use a file source so we can test that LoadWithoutWatch does not start
+	// the fsnotify watcher.
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "config.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte("key: value\n"), 0644))
+
+	fileSrc := source.NewFileSource(configFile)
+	cm, err := NewConfigManager([]source.ConfigSource{fileSrc}, WithLogger(zap.NewNop()))
+	require.NoError(t, err)
+
+	// LoadWithoutWatch should load without starting watchers
+	require.NoError(t, cm.LoadWithoutWatch())
+
+	// Value should be loaded
+	val, _, err := cm.Get("key")
+	require.NoError(t, err)
+	assert.Equal(t, "value", val)
+
+	// No source should be marked as watched
+	for _, src := range cm.sources {
+		assert.False(t, cm.watchedSources[src], "source should not be watched after LoadWithoutWatch")
+	}
+
+	// StartWatching should activate watchers
+	cm.StartWatching()
+	for _, src := range cm.sources {
+		assert.True(t, cm.watchedSources[src], "source should be watched after StartWatching")
+	}
 }
 
 func TestConfigManager_DeleteNotifiesWatchers(t *testing.T) {
@@ -2423,9 +2454,9 @@ func TestConfigManager_RootNamespacePersist(t *testing.T) {
 
 	// Define a simple config struct for testing
 	type AppConfig struct {
-		Name     string `config:"name"`
-		Port     int    `config:"port"`
-		Enabled  bool   `config:"enabled"`
+		Name    string `config:"name"`
+		Port    int    `config:"port"`
+		Enabled bool   `config:"enabled"`
 	}
 
 	// First manager: Create, set values, and persist

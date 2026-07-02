@@ -25,7 +25,9 @@ type SubscriptionCallback func(pattern, key string, value any)
 type Manager interface {
 	// Core operations
 	Load() error
+	LoadWithoutWatch() error
 	LoadAll() error
+	StartWatching()
 	Shutdown() error
 	Validate(keyPrefix ...string) error
 	Persist(keyPrefix ...string) error
