@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -78,6 +79,47 @@ func (m *MockKV) Get(ctx context.Context, key string, opts ...clientv3.OpOption)
 			},
 		},
 	}, nil
+}
+
+func (m *MockKV) GetStream(ctx context.Context, key string, opts ...clientv3.OpOption) (clientv3.GetStreamChan, error) {
+	ch := make(chan clientv3.RangeStreamResponse, 1)
+
+	go func() {
+		defer close(ch)
+
+		// Collect matching results under the read lock, then release
+		// before sending to avoid deadlocking with concurrent Put/Delete.
+		m.mu.RLock()
+		op := clientv3.OpGet(key, opts...)
+		var results []*mvccpb.KeyValue
+		if op.IsOptsWithPrefix() {
+			prefix := string(op.KeyBytes())
+			for k, v := range m.data {
+				if strings.HasPrefix(k, prefix) {
+					results = append(results, &mvccpb.KeyValue{Key: []byte(k), Value: v})
+				}
+			}
+		} else {
+			if val, exists := m.data[key]; exists {
+				results = append(results, &mvccpb.KeyValue{Key: []byte(key), Value: val})
+			}
+		}
+		m.mu.RUnlock()
+
+		for _, kv := range results {
+			select {
+			case ch <- clientv3.RangeStreamResponse{
+				RangeResponse: &pb.RangeResponse{
+					Kvs: []*mvccpb.KeyValue{kv},
+				},
+			}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return ch, nil
 }
 
 func (m *MockKV) Delete(ctx context.Context, key string, opts ...clientv3.OpOption) (*clientv3.DeleteResponse, error) {
