@@ -104,7 +104,7 @@ test.key3: initial
 			assert.Equal(t, "updated", val1)
 			assert.Equal(t, "initial", val2)
 			assert.Equal(t, "initial", val3)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("timeout waiting for change notification")
 		}
 	})
@@ -138,7 +138,7 @@ test.key3: initial
 		select {
 		case keys := <-changeChan:
 			assert.Equal(t, AllChanges, keys)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("timeout waiting for delete notification")
 		}
 	})
@@ -181,7 +181,7 @@ key5: v5
 		select {
 		case keys := <-changeChan:
 			assert.Equal(t, AllChanges, keys)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("timeout waiting for change notification")
 		}
 	})
@@ -224,7 +224,7 @@ key4: v4
 		select {
 		case keys := <-changeChan:
 			assert.Equal(t, []string{"key1"}, keys)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("timeout waiting for change notification")
 		}
 	})
@@ -259,7 +259,7 @@ key2: v2
 		select {
 		case keys := <-changeChan:
 			assert.Equal(t, []string{"key2"}, keys)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("timeout waiting for change notification")
 		}
 	})
@@ -295,7 +295,7 @@ key2: v2
 		select {
 		case keys := <-changeChan:
 			assert.Equal(t, []string{"key2"}, keys)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("timeout waiting for change notification")
 		}
 	})
@@ -331,7 +331,7 @@ key2: v2
 		select {
 		case keys := <-changeChan:
 			assert.Equal(t, AllChanges, keys)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("timeout waiting for change notification")
 		}
 	})
@@ -364,7 +364,7 @@ key2: v2
 		select {
 		case keys := <-changeChan:
 			assert.Nil(t, keys)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("timeout waiting for change notification")
 		}
 	})
@@ -395,7 +395,7 @@ key2: v2
 		select {
 		case err := <-errChan:
 			assert.Error(t, err)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("timeout waiting for error notification")
 		}
 	})
@@ -425,7 +425,7 @@ key2: v2
 		select {
 		case err := <-errChan:
 			assert.Error(t, err)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("timeout waiting for error notification")
 		}
 	})

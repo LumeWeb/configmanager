@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"sync"
+	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
@@ -23,6 +25,11 @@ type fileSource struct {
 	changedThreshold float64 // Percentage (0-1) of keys that must change to trigger full reload
 	logger           *zap.Logger
 	initialLoad      bool // Track if this is the first load
+	watcher          *fsnotify.Watcher
+	watcherDone      chan struct{}
+	debounceTimer    *time.Timer
+	watcherLock      sync.Mutex // Protects watcher, watcherDone, debounceTimer
+	processWg        sync.WaitGroup // Tracks in-flight processFile invocations
 }
 
 type FileSourceOption func(*fileSource)
@@ -100,51 +107,190 @@ func (f *fileSource) Load(ctx context.Context, cm configManager) error {
 }
 
 func (f *fileSource) Watch(ctx context.Context, cm configManager, cb WatchOnChangeCallback) error {
-	return f.provider.Watch(func(event any, err error) {
-		if err != nil {
-			// if err is not nil, it means the file was removed
-			cb(AllChanges, err)
-			return
-		}
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
 
-		// Create temporary koanf to load new values
-		tmpKoanf := koanf.New(".")
+	realPath, err := filepath.EvalSymlinks(f.path)
+	if err != nil {
+		w.Close()
+		return err
+	}
+	realPath = filepath.Clean(realPath)
 
-		// Let koanf handle the reading and parsing
-		if err := tmpKoanf.Load(f.provider, yaml.Parser()); err != nil {
-			cb(nil, err)
-			return
-		}
+	// Watch the parent directory to catch create/remove/rename events.
+	fDir := filepath.Dir(f.path)
+	if err := w.Add(fDir); err != nil {
+		w.Close()
+		return err
+	}
 
-		// Compare with previous state
-		f.prevLock.Lock()
-		changedKeys := f.detectChangedKeys(f.prevState, tmpKoanf.All())
-		f.prevState = tmpKoanf.All()
-		f.prevLock.Unlock()
+	f.watcher = w
+	f.watcherDone = make(chan struct{})
 
-		if len(changedKeys) == 0 {
-			cb(nil, nil)
-			return
-		}
+	go func() {
+		defer close(f.watcherDone)
+		var (
+			lastEvent     string
+			lastEventTime time.Time
+		)
 
-		// Update config manager with changed values
-		for _, key := range changedKeys {
-			if tmpKoanf.Exists(key) {
-				if err := cm.Set(ctx, key, tmpKoanf.Get(key)); err != nil {
-					cb(nil, err)
-					return
-				}
-			} else {
-				// Handle deleted keys by setting nil
-				if err := cm.Set(ctx, key, nil); err != nil {
-					cb(nil, err)
-					return
+		processFile := func() {
+			defer f.processWg.Done()
+			tmpKoanf := koanf.New(".")
+			if err := tmpKoanf.Load(f.provider, yaml.Parser()); err != nil {
+				cb(nil, err)
+				return
+			}
+
+			f.prevLock.Lock()
+			changedKeys := f.detectChangedKeys(f.prevState, tmpKoanf.All())
+			f.prevState = tmpKoanf.All()
+			f.prevLock.Unlock()
+
+			if len(changedKeys) == 0 {
+				cb(nil, nil)
+				return
+			}
+
+			for _, key := range changedKeys {
+				if tmpKoanf.Exists(key) {
+					if err := cm.Set(ctx, key, tmpKoanf.Get(key)); err != nil {
+						cb(nil, err)
+						return
+					}
+				} else {
+					if err := cm.Set(ctx, key, nil); err != nil {
+						cb(nil, err)
+						return
+					}
 				}
 			}
+
+			cb(changedKeys, nil)
 		}
 
-		cb(changedKeys, nil)
-	})
+		for {
+			select {
+			case event, ok := <-w.Events:
+				if !ok {
+					return
+				}
+
+				// Debounce duplicate events (some platforms fire multiple times).
+				if event.String() == lastEvent && time.Since(lastEventTime) < 5*time.Millisecond {
+					continue
+				}
+				lastEvent = event.String()
+				lastEventTime = time.Now()
+
+				evFile := filepath.Clean(event.Name)
+				if evFile != realPath && evFile != f.path {
+					continue
+				}
+
+				// File was removed.
+				if event.Op&fsnotify.Remove != 0 {
+					f.stopDebounce()
+					cb(AllChanges, fmt.Errorf("file %s was removed", event.Name))
+					return
+				}
+
+				// Resolve symlink in case the target changed.
+				curPath, err := filepath.EvalSymlinks(f.path)
+				if err != nil {
+					f.stopDebounce()
+					cb(nil, err)
+					return
+				}
+				realPath = filepath.Clean(curPath)
+
+				// Only care about write and create events.
+				if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
+					continue
+				}
+
+				// Debounce: wait 50ms for events to settle before processing.
+				// os.WriteFile can trigger multiple fsnotify events; reading
+				// during a partial write produces incorrect diff results.
+				f.watcherLock.Lock()
+				if f.debounceTimer != nil {
+					// Stop the previous timer. If Stop returns true the func
+					// hasn't fired yet, so undo the Add(1) to keep the
+					// WaitGroup balanced. If false, processFile already ran
+					// (or is running) and will call Done itself.
+					if f.debounceTimer.Stop() {
+						f.processWg.Done()
+					}
+				}
+				f.processWg.Add(1)
+				f.debounceTimer = time.AfterFunc(50*time.Millisecond, processFile)
+				f.watcherLock.Unlock()
+
+			case err, ok := <-w.Errors:
+				if !ok {
+					return
+				}
+				f.stopDebounce()
+				cb(nil, err)
+				return
+			}
+		}
+	}()
+
+	return nil
+}
+
+// stopDebounce stops the pending debounce timer and waits for any
+// in-flight processFile to complete, ensuring no concurrent cb()
+// invocations. Called from the watcher goroutine on Remove, Error,
+// and EvalSymlinks-failure paths before invoking cb() directly.
+func (f *fileSource) stopDebounce() {
+	f.watcherLock.Lock()
+	var pending bool
+	if f.debounceTimer != nil {
+		if f.debounceTimer.Stop() {
+			f.processWg.Done()
+		} else {
+			pending = true // processFile already fired or is running
+		}
+		f.debounceTimer = nil
+	}
+	f.watcherLock.Unlock()
+	if pending {
+		f.processWg.Wait()
+	}
+}
+
+func (f *fileSource) Stop() error {
+	f.watcherLock.Lock()
+	if f.watcher == nil {
+		f.watcherLock.Unlock()
+		return nil
+	}
+	watcher := f.watcher
+	f.watcherLock.Unlock()
+
+	f.stopDebounce()
+
+	err := watcher.Close()
+	<-f.watcherDone
+
+	// Re-stop any timer the goroutine may have created between the
+	// unlock above and its exit; the goroutine cannot create any more
+	// timers once watcherDone is closed.
+	f.stopDebounce()
+
+	f.watcherLock.Lock()
+	f.watcher = nil
+	f.watcherLock.Unlock()
+
+	// Guarantee no processFile outlives Stop(), even if a previously
+	// replaced timer's processFile is still running.
+	f.processWg.Wait()
+
+	return err
 }
 
 func (f *fileSource) detectChangedKeys(oldState, newState map[string]any) []string {
