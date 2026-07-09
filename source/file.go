@@ -286,6 +286,10 @@ func (f *fileSource) Stop() error {
 	f.watcher = nil
 	f.watcherLock.Unlock()
 
+	// Guarantee no processFile outlives Stop(), even if a previously
+	// replaced timer's processFile is still running.
+	f.processWg.Wait()
+
 	return err
 }
 
