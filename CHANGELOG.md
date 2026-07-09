@@ -1,3 +1,12 @@
+## 0.3.29 (2026-07-09)
+
+### Fixes
+
+- resolve flaky TestFileSource_Watch with proper fsnotify lifecycle
+- wait for in-flight processFile before cb() on all exit paths
+- add unconditional processWg.Wait() in Stop() for safety
+- add GetStream method to MockKV for etcd v3.7.0 compatibility
+
 ## 0.3.28 (2026-03-15)
 
 ### Fixes
