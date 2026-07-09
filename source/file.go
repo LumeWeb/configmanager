@@ -192,14 +192,7 @@ func (f *fileSource) Watch(ctx context.Context, cm configManager, cb WatchOnChan
 
 				// File was removed.
 				if event.Op&fsnotify.Remove != 0 {
-					f.watcherLock.Lock()
-					if f.debounceTimer != nil {
-						if f.debounceTimer.Stop() {
-							f.processWg.Done()
-						}
-						f.debounceTimer = nil
-					}
-					f.watcherLock.Unlock()
+					f.stopDebounce()
 					cb(AllChanges, fmt.Errorf("file %s was removed", event.Name))
 					return
 				}
@@ -207,6 +200,7 @@ func (f *fileSource) Watch(ctx context.Context, cm configManager, cb WatchOnChan
 				// Resolve symlink in case the target changed.
 				curPath, err := filepath.EvalSymlinks(f.path)
 				if err != nil {
+					f.stopDebounce()
 					cb(nil, err)
 					return
 				}
@@ -238,14 +232,7 @@ func (f *fileSource) Watch(ctx context.Context, cm configManager, cb WatchOnChan
 				if !ok {
 					return
 				}
-				f.watcherLock.Lock()
-				if f.debounceTimer != nil {
-					if f.debounceTimer.Stop() {
-						f.processWg.Done()
-					}
-					f.debounceTimer = nil
-				}
-				f.watcherLock.Unlock()
+				f.stopDebounce()
 				cb(nil, err)
 				return
 			}
@@ -255,22 +242,37 @@ func (f *fileSource) Watch(ctx context.Context, cm configManager, cb WatchOnChan
 	return nil
 }
 
+// stopDebounce stops the pending debounce timer and waits for any
+// in-flight processFile to complete, ensuring no concurrent cb()
+// invocations. Called from the watcher goroutine on Remove, Error,
+// and EvalSymlinks-failure paths before invoking cb() directly.
+func (f *fileSource) stopDebounce() {
+	f.watcherLock.Lock()
+	var pending bool
+	if f.debounceTimer != nil {
+		if f.debounceTimer.Stop() {
+			f.processWg.Done()
+		} else {
+			pending = true // processFile already fired or is running
+		}
+		f.debounceTimer = nil
+	}
+	f.watcherLock.Unlock()
+	if pending {
+		f.processWg.Wait()
+	}
+}
+
 func (f *fileSource) Stop() error {
 	f.watcherLock.Lock()
 	if f.watcher == nil {
 		f.watcherLock.Unlock()
 		return nil
 	}
-	// Stop any pending debounce timer first to prevent
-	// processFile from running during shutdown.
-	if f.debounceTimer != nil {
-		if f.debounceTimer.Stop() {
-			f.processWg.Done()
-		}
-		f.debounceTimer = nil
-	}
 	watcher := f.watcher
 	f.watcherLock.Unlock()
+
+	f.stopDebounce()
 
 	err := watcher.Close()
 	<-f.watcherDone
@@ -278,18 +280,11 @@ func (f *fileSource) Stop() error {
 	// Re-stop any timer the goroutine may have created between the
 	// unlock above and its exit; the goroutine cannot create any more
 	// timers once watcherDone is closed.
+	f.stopDebounce()
+
 	f.watcherLock.Lock()
-	if f.debounceTimer != nil {
-		if f.debounceTimer.Stop() {
-			f.processWg.Done()
-		}
-		f.debounceTimer = nil
-	}
 	f.watcher = nil
 	f.watcherLock.Unlock()
-
-	// Wait for any in-flight processFile to complete.
-	f.processWg.Wait()
 
 	return err
 }
