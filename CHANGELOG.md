@@ -1,3 +1,13 @@
+## 0.3.30 (2026-08-28)
+
+### Features
+
+- add ErrKeyNotFound sentinel and OK getter variants
+
+### Fixes
+
+- resolve *OK getters through namespace-aware Get
+
 ## 0.3.29 (2026-07-09)
 
 ### Fixes

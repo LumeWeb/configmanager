@@ -1,4 +1,4 @@
-module go.lumeweb.com/configmanager // v0.3.29
+module go.lumeweb.com/configmanager // v0.3.30
 
 go 1.26
 
