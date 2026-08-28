@@ -481,9 +481,6 @@ func (cm *ConfigManagerDefault) GetString(key string) (string, error) {
 // GetStringOK returns the string value for the given key and whether the key
 // was set. A present-but-empty value returns ("", true), not ("", false).
 func (cm *ConfigManagerDefault) GetStringOK(key string) (string, bool) {
-	if !cm.Exists(key) {
-		return "", false
-	}
 	val, _, err := cm.Get(key)
 	if err != nil {
 		return "", false
@@ -503,9 +500,6 @@ func (cm *ConfigManagerDefault) GetInt(key string) (int64, error) {
 // GetIntOK returns the int64 value for the given key and whether the key was
 // set. A present-but-invalid value returns (0, false).
 func (cm *ConfigManagerDefault) GetIntOK(key string) (int64, bool) {
-	if !cm.Exists(key) {
-		return 0, false
-	}
 	val, _, err := cm.Get(key)
 	if err != nil {
 		return 0, false
@@ -529,9 +523,6 @@ func (cm *ConfigManagerDefault) GetBool(key string) (bool, error) {
 // GetBoolOK returns the bool value for the given key and whether the key was
 // set. A present-but-invalid value returns (false, false).
 func (cm *ConfigManagerDefault) GetBoolOK(key string) (bool, bool) {
-	if !cm.Exists(key) {
-		return false, false
-	}
 	val, _, err := cm.Get(key)
 	if err != nil {
 		return false, false
@@ -555,9 +546,6 @@ func (cm *ConfigManagerDefault) GetDuration(key string) (time.Duration, error) {
 // GetDurationOK returns the time.Duration value for the given key and whether
 // the key was set. A present-but-invalid value returns (0, false).
 func (cm *ConfigManagerDefault) GetDurationOK(key string) (time.Duration, bool) {
-	if !cm.Exists(key) {
-		return 0, false
-	}
 	val, _, err := cm.Get(key)
 	if err != nil {
 		return 0, false
@@ -581,9 +569,6 @@ func (cm *ConfigManagerDefault) GetStringSlice(key string) ([]string, error) {
 // GetStringSliceOK returns the []string value for the given key and whether
 // the key was set. A present-but-invalid value returns (nil, false).
 func (cm *ConfigManagerDefault) GetStringSliceOK(key string) ([]string, bool) {
-	if !cm.Exists(key) {
-		return nil, false
-	}
 	val, _, err := cm.Get(key)
 	if err != nil {
 		return nil, false
@@ -604,10 +589,10 @@ func (cm *ConfigManagerDefault) IsSet(ctx context.Context, key string) bool {
 
 // IsSetOK checks if a configuration key exists and has a non-zero value.
 func (cm *ConfigManagerDefault) IsSetOK(key string) bool {
-	if !cm.Exists(key) {
+	val, _, err := cm.Get(key)
+	if err != nil {
 		return false
 	}
-	val, _, _ := cm.Get(key)
 	return !reflect.ValueOf(val).IsZero()
 }
 

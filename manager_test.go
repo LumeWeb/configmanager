@@ -2799,6 +2799,28 @@ func TestIsSetOK(t *testing.T) {
 	assert.False(t, cm.IsSetOK("missing"))
 }
 
+func TestGetStringOK_NamespaceResolution(t *testing.T) {
+	ns := "app"
+	memSource := source.NewMemoryConfigSource(map[string]any{"port": "8080"})
+
+	cm, err := NewConfigManager([]source.ConfigSource{})
+	require.NoError(t, err)
+	cm.RegisterSource(memSource)
+	cm.RegisterNamespace(ns, memSource)
+	require.NoError(t, cm.LoadNamespace(ns))
+
+	// The OK getters must resolve through the same namespace-aware path as Get.
+	val, ok := cm.GetStringOK(ns + ".port")
+	assert.Equal(t, "8080", val)
+	assert.True(t, ok)
+	assert.True(t, cm.IsSetOK(ns+".port"))
+
+	val, ok = cm.GetStringOK("missing")
+	assert.Equal(t, "", val)
+	assert.False(t, ok)
+	assert.False(t, cm.IsSetOK("missing"))
+}
+
 func TestIsSet_KeepsContextSignature(t *testing.T) {
 	cm := newTestManager()
 	require.NoError(t, cm.Set(context.Background(), "present", "value"))
