@@ -2693,3 +2693,117 @@ func TestPinnerStyleGetRootNS(t *testing.T) {
 		}
 	}
 }
+
+func TestGet_ErrKeyNotFound(t *testing.T) {
+	cm := newTestManager()
+
+	_, _, err := cm.Get("missing.key")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrKeyNotFound)
+}
+
+func TestGetStringOK(t *testing.T) {
+	cm := newTestManager()
+	require.NoError(t, cm.Set(context.Background(), "name", "alice"))
+	require.NoError(t, cm.Set(context.Background(), "empty", ""))
+
+	val, ok := cm.GetStringOK("name")
+	assert.Equal(t, "alice", val)
+	assert.True(t, ok)
+
+	// Present-but-empty is distinct from absent.
+	val, ok = cm.GetStringOK("empty")
+	assert.Equal(t, "", val)
+	assert.True(t, ok)
+
+	val, ok = cm.GetStringOK("missing")
+	assert.Equal(t, "", val)
+	assert.False(t, ok)
+}
+
+func TestGetIntOK(t *testing.T) {
+	cm := newTestManager()
+	require.NoError(t, cm.Set(context.Background(), "port", 8080))
+	require.NoError(t, cm.Set(context.Background(), "bad", "not-an-int"))
+
+	val, ok := cm.GetIntOK("port")
+	assert.Equal(t, int64(8080), val)
+	assert.True(t, ok)
+
+	// Present but not convertible to int64.
+	val, ok = cm.GetIntOK("bad")
+	assert.Equal(t, int64(0), val)
+	assert.False(t, ok)
+
+	val, ok = cm.GetIntOK("missing")
+	assert.Equal(t, int64(0), val)
+	assert.False(t, ok)
+}
+
+func TestGetBoolOK(t *testing.T) {
+	cm := newTestManager()
+	require.NoError(t, cm.Set(context.Background(), "enabled", true))
+	require.NoError(t, cm.Set(context.Background(), "bad", "not-a-bool"))
+
+	val, ok := cm.GetBoolOK("enabled")
+	assert.True(t, val)
+	assert.True(t, ok)
+
+	val, ok = cm.GetBoolOK("bad")
+	assert.False(t, val)
+	assert.False(t, ok)
+
+	val, ok = cm.GetBoolOK("missing")
+	assert.False(t, val)
+	assert.False(t, ok)
+}
+
+func TestGetDurationOK(t *testing.T) {
+	cm := newTestManager()
+	require.NoError(t, cm.Set(context.Background(), "timeout", 5*time.Second))
+	require.NoError(t, cm.Set(context.Background(), "bad", "not-a-duration"))
+
+	val, ok := cm.GetDurationOK("timeout")
+	assert.Equal(t, 5*time.Second, val)
+	assert.True(t, ok)
+
+	val, ok = cm.GetDurationOK("bad")
+	assert.Equal(t, time.Duration(0), val)
+	assert.False(t, ok)
+
+	val, ok = cm.GetDurationOK("missing")
+	assert.Equal(t, time.Duration(0), val)
+	assert.False(t, ok)
+}
+
+func TestGetStringSliceOK(t *testing.T) {
+	cm := newTestManager()
+	require.NoError(t, cm.Set(context.Background(), "tags", []string{"a", "b"}))
+
+	val, ok := cm.GetStringSliceOK("tags")
+	assert.Equal(t, []string{"a", "b"}, val)
+	assert.True(t, ok)
+
+	val, ok = cm.GetStringSliceOK("missing")
+	assert.Nil(t, val)
+	assert.False(t, ok)
+}
+
+func TestIsSetOK(t *testing.T) {
+	cm := newTestManager()
+	require.NoError(t, cm.Set(context.Background(), "present", "value"))
+	require.NoError(t, cm.Set(context.Background(), "empty", ""))
+
+	assert.True(t, cm.IsSetOK("present"))
+	assert.False(t, cm.IsSetOK("empty"))
+	assert.False(t, cm.IsSetOK("missing"))
+}
+
+func TestIsSet_KeepsContextSignature(t *testing.T) {
+	cm := newTestManager()
+	require.NoError(t, cm.Set(context.Background(), "present", "value"))
+
+	// Legacy signature must still compile and behave identically.
+	assert.True(t, cm.IsSet(context.Background(), "present"))
+	assert.False(t, cm.IsSet(context.Background(), "missing"))
+}

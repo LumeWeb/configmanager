@@ -2,6 +2,7 @@ package configmanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/Oudwins/zog"
 	_ "github.com/Oudwins/zog"
@@ -25,6 +26,11 @@ const (
 	keySeparator             = "."
 	ROOT_NS                  = ""
 )
+
+// ErrKeyNotFound is returned when a configuration key does not exist.
+// Use errors.Is(err, ErrKeyNotFound) to distinguish a missing key from other
+// configuration source failures.
+var ErrKeyNotFound = errors.New("configuration key not found")
 
 // copy creates a throwaway copy of the ConfigManagerDefault with a new Koanf instance.
 func (cm *ConfigManagerDefault) copy() *ConfigManagerDefault {
@@ -472,6 +478,19 @@ func (cm *ConfigManagerDefault) GetString(key string) (string, error) {
 	return fmt.Sprintf("%v", val), nil
 }
 
+// GetStringOK returns the string value for the given key and whether the key
+// was set. A present-but-empty value returns ("", true), not ("", false).
+func (cm *ConfigManagerDefault) GetStringOK(key string) (string, bool) {
+	if !cm.Exists(key) {
+		return "", false
+	}
+	val, _, err := cm.Get(key)
+	if err != nil {
+		return "", false
+	}
+	return fmt.Sprintf("%v", val), true
+}
+
 // GetInt returns the int64 value for the given key.
 func (cm *ConfigManagerDefault) GetInt(key string) (int64, error) {
 	val, _, err := cm.Get(key)
@@ -479,6 +498,23 @@ func (cm *ConfigManagerDefault) GetInt(key string) (int64, error) {
 		return 0, err
 	}
 	return cast.ToInt64E(val)
+}
+
+// GetIntOK returns the int64 value for the given key and whether the key was
+// set. A present-but-invalid value returns (0, false).
+func (cm *ConfigManagerDefault) GetIntOK(key string) (int64, bool) {
+	if !cm.Exists(key) {
+		return 0, false
+	}
+	val, _, err := cm.Get(key)
+	if err != nil {
+		return 0, false
+	}
+	i, err := cast.ToInt64E(val)
+	if err != nil {
+		return 0, false
+	}
+	return i, true
 }
 
 // GetBool returns the bool value for the given key.
@@ -490,6 +526,23 @@ func (cm *ConfigManagerDefault) GetBool(key string) (bool, error) {
 	return cast.ToBoolE(val)
 }
 
+// GetBoolOK returns the bool value for the given key and whether the key was
+// set. A present-but-invalid value returns (false, false).
+func (cm *ConfigManagerDefault) GetBoolOK(key string) (bool, bool) {
+	if !cm.Exists(key) {
+		return false, false
+	}
+	val, _, err := cm.Get(key)
+	if err != nil {
+		return false, false
+	}
+	b, err := cast.ToBoolE(val)
+	if err != nil {
+		return false, false
+	}
+	return b, true
+}
+
 // GetDuration returns the time.Duration value for the given key.
 func (cm *ConfigManagerDefault) GetDuration(key string) (time.Duration, error) {
 	val, _, err := cm.Get(key)
@@ -497,6 +550,23 @@ func (cm *ConfigManagerDefault) GetDuration(key string) (time.Duration, error) {
 		return 0, err
 	}
 	return cast.ToDurationE(val)
+}
+
+// GetDurationOK returns the time.Duration value for the given key and whether
+// the key was set. A present-but-invalid value returns (0, false).
+func (cm *ConfigManagerDefault) GetDurationOK(key string) (time.Duration, bool) {
+	if !cm.Exists(key) {
+		return 0, false
+	}
+	val, _, err := cm.Get(key)
+	if err != nil {
+		return 0, false
+	}
+	d, err := cast.ToDurationE(val)
+	if err != nil {
+		return 0, false
+	}
+	return d, true
 }
 
 // GetStringSlice returns the []string value for the given key.
@@ -508,8 +578,32 @@ func (cm *ConfigManagerDefault) GetStringSlice(key string) ([]string, error) {
 	return cast.ToStringSliceE(val)
 }
 
+// GetStringSliceOK returns the []string value for the given key and whether
+// the key was set. A present-but-invalid value returns (nil, false).
+func (cm *ConfigManagerDefault) GetStringSliceOK(key string) ([]string, bool) {
+	if !cm.Exists(key) {
+		return nil, false
+	}
+	val, _, err := cm.Get(key)
+	if err != nil {
+		return nil, false
+	}
+	s, err := cast.ToStringSliceE(val)
+	if err != nil {
+		return nil, false
+	}
+	return s, true
+}
+
 // IsSet checks if a configuration key exists and has a non-zero value.
+// The ctx argument is unused and is retained only for backward compatibility;
+// prefer IsSetOK.
 func (cm *ConfigManagerDefault) IsSet(ctx context.Context, key string) bool {
+	return cm.IsSetOK(key)
+}
+
+// IsSetOK checks if a configuration key exists and has a non-zero value.
+func (cm *ConfigManagerDefault) IsSetOK(key string) bool {
 	if !cm.Exists(key) {
 		return false
 	}
@@ -542,11 +636,10 @@ func (cm *ConfigManagerDefault) Get(key string, target ...any) (any, any, error)
 
 	// Get raw value first
 	if !isRootStructRequest && !cm.koanf.Exists(fullKey) {
-		errMsg := fmt.Sprintf("configuration key '%s' not found", fullKey)
 		if desc := cm.descriptionManager.GetDescription(fullKey); desc != "" {
-			errMsg += fmt.Sprintf(" (%s)", desc)
+			return nil, nil, fmt.Errorf("%w: %s (%s)", ErrKeyNotFound, fullKey, desc)
 		}
-		return nil, nil, fmt.Errorf("%s", errMsg)
+		return nil, nil, fmt.Errorf("%w: %s", ErrKeyNotFound, fullKey)
 	}
 
 	var raw any
@@ -784,6 +877,9 @@ func (cm *ConfigManagerDefault) All() map[string]any {
 }
 
 // Exists checks if a configuration key exists.
+// Exists reports whether a configuration key is present, regardless of whether
+// its value is zero or empty. To distinguish a present-but-empty value from an
+// absent or non-zero one, use IsSetOK or the *OK getter variants.
 func (cm *ConfigManagerDefault) Exists(key string) bool {
 	return cm.koanf.Exists(key)
 }
@@ -1034,7 +1130,7 @@ func (cm *ConfigManagerDefault) Validate(keyPrefix ...string) error {
 		keys := cm.getFilteredKeys(keyPrefix...)
 		if len(keys) == 0 {
 			if len(keyPrefix) == 1 {
-				return fmt.Errorf("configuration key '%s' not found", keyPrefix[0])
+				return fmt.Errorf("%w: %s", ErrKeyNotFound, keyPrefix[0])
 			}
 			return fmt.Errorf("no configuration keys found matching prefixes: %v", keyPrefix)
 		}
@@ -1066,11 +1162,10 @@ func (cm *ConfigManagerDefault) validateConfig(key string) error {
 
 	// First check if the key exists in the configuration
 	if !cm.Exists(key) {
-		errMsg := fmt.Sprintf("configuration key '%s' not found", key)
 		if desc := cm.descriptionManager.GetDescription(key); desc != "" {
-			errMsg += fmt.Sprintf(" (%s)", desc)
+			return fmt.Errorf("%w: %s (%s)", ErrKeyNotFound, key, desc)
 		}
-		return fmt.Errorf("%s", errMsg)
+		return fmt.Errorf("%w: %s", ErrKeyNotFound, key)
 	}
 
 	// Check if we have a registered struct for this key

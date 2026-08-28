@@ -47,12 +47,18 @@ type Manager interface {
 	// Configuration access
 	Get(key string, target ...any) (any, any, error)
 	GetString(key string) (string, error)
+	GetStringOK(key string) (string, bool)
 	GetInt(key string) (int64, error)
+	GetIntOK(key string) (int64, bool)
 	GetBool(key string) (bool, error)
+	GetBoolOK(key string) (bool, bool)
 	GetDuration(key string) (time.Duration, error)
+	GetDurationOK(key string) (time.Duration, bool)
 	GetStringSlice(key string) ([]string, error)
+	GetStringSliceOK(key string) ([]string, bool)
 	All() map[string]any
 	IsSet(ctx context.Context, key string) bool
+	IsSetOK(key string) bool
 	Exists(key string) bool
 
 	// Configuration modification
