@@ -837,9 +837,9 @@ func TestEnvConfigSource_ArrayParsing_ComplexJson(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name        string
-		input       string
-		isParsed    bool
+		name     string
+		input    string
+		isParsed bool
 	}{
 		{
 			name:     "Malformed JSON should not parse as array",
@@ -879,3 +879,141 @@ func TestEnvConfigSource_ArrayParsing_ComplexJson(t *testing.T) {
 	}
 }
 
+func TestEnvConfigSource_ArrayParsing_StructuredJSON(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name           string
+		envVars        map[string]string
+		strategy       ArrayStrategy
+		expectedKey    string
+		expectedExists bool
+		expectedVal    any
+	}{
+		{
+			name: "JSON array of objects",
+			envVars: map[string]string{
+				"APP_ITEMS": `[{"k":"v","n":2},{"k":"w","n":3}]`,
+			},
+			strategy:       ArrayStrategyAuto,
+			expectedKey:    "items",
+			expectedExists: true,
+			expectedVal: []any{
+				map[string]any{"k": "v", "n": int64(2)},
+				map[string]any{"k": "w", "n": int64(3)},
+			},
+		},
+		{
+			name: "index-based object elements",
+			envVars: map[string]string{
+				"APP_ITEMS_0": `{"k":"v"}`,
+				"APP_ITEMS_1": `{"k":"w"}`,
+			},
+			strategy:       ArrayStrategyAuto,
+			expectedKey:    "items",
+			expectedExists: true,
+			expectedVal: []any{
+				map[string]any{"k": "v"},
+				map[string]any{"k": "w"},
+			},
+		},
+		{
+			name: "index-based mixed scalar and object elements",
+			envVars: map[string]string{
+				"APP_ITEMS_0": "plain",
+				"APP_ITEMS_1": `{"k":"v"}`,
+			},
+			strategy:       ArrayStrategyAuto,
+			expectedKey:    "items",
+			expectedExists: true,
+			expectedVal: []any{
+				"plain",
+				map[string]any{"k": "v"},
+			},
+		},
+		{
+			name: "index-based entries are removed from the tree",
+			envVars: map[string]string{
+				"APP_ITEMS_0": `{"k":"v"}`,
+			},
+			strategy:       ArrayStrategyAuto,
+			expectedKey:    "items_0",
+			expectedExists: false,
+			expectedVal:    nil,
+		},
+		{
+			name: "JSON array of numbers",
+			envVars: map[string]string{
+				"APP_NUMS": `[1,2.5]`,
+			},
+			strategy:       ArrayStrategyAuto,
+			expectedKey:    "nums",
+			expectedExists: true,
+			expectedVal:    []any{int64(1), 2.5},
+		},
+		{
+			name: "top-level JSON object",
+			envVars: map[string]string{
+				"APP_OBJ": `{"k":"v","nested":{"a":1}}`,
+			},
+			strategy:       ArrayStrategyAuto,
+			expectedKey:    "obj",
+			expectedExists: true,
+			expectedVal: map[string]any{
+				"k":      "v",
+				"nested": map[string]any{"a": int64(1)},
+			},
+		},
+		{
+			name: "JSON with trailing garbage should not parse",
+			envVars: map[string]string{
+				"APP_JUNK": `[1] trailing`,
+			},
+			strategy:       ArrayStrategyAuto,
+			expectedKey:    "junk",
+			expectedExists: true,
+			expectedVal:    "[1] trailing",
+		},
+		{
+			name: "delimited strategy should not parse JSON objects",
+			envVars: map[string]string{
+				"APP_ITEMS": `[{"k":"v"}]`,
+			},
+			strategy:       ArrayStrategyDelimited,
+			expectedKey:    "items",
+			expectedExists: true,
+			expectedVal:    `[{"k":"v"}]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				os.Setenv(k, v)
+			}
+			defer func() {
+				for k := range tt.envVars {
+					os.Unsetenv(k)
+				}
+			}()
+
+			mgr := newMockManager(".")
+			source := NewEnvConfigSource("APP_", "_",
+				WithEnvSourceArrayStrategy(tt.strategy, ""))
+
+			err := source.Load(ctx, mgr)
+			assert.NoError(t, err)
+
+			assert.Equal(t, tt.expectedExists, mgr.Exists(tt.expectedKey),
+				"existence for key '%s' should match", tt.expectedKey)
+
+			if !tt.expectedExists {
+				return
+			}
+
+			val, _, err := mgr.Get(tt.expectedKey)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedVal, val)
+		})
+	}
+}
