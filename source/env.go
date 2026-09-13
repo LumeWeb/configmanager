@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/samber/lo"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -25,8 +27,11 @@ const (
 	// Delimiter defaults to comma but can be configured.
 	ArrayStrategyDelimited
 
-	// ArrayStrategyJSON parses values as JSON arrays.
-	// Example: '["value1","value2"]' → []string{"value1", "value2"}
+	// ArrayStrategyJSON parses values as JSON arrays or objects.
+	// Array elements keep their JSON types: strings, objects (as map[string]any,
+	// decodeable into struct fields), numbers and nested arrays.
+	// Example: '["a","b"]' → []string{"a", "b"}
+	// Example: '[{"k":"v"}]' → []any{map[string]any{"k": "v"}}
 	ArrayStrategyJSON
 )
 
@@ -34,14 +39,17 @@ const (
 // Note: colon ":" and space " " are excluded to avoid false positives with URLs, IP addresses, and multi-word strings.
 var commonDelimiters = []string{",", "|", ";"}
 
+// maxIndexCount bounds the highest valid index for index-based array elements.
+const maxIndexCount = 1000
+
 // EnvConfigSource loads configuration from environment variables.
 type EnvConfigSource struct {
 	prefix         string
 	delimiter      string
-	global         bool                      // Controls whether this source should be loaded globally
-	arrayStrategy  ArrayStrategy             // Strategy for parsing array values
-	arrayDelimiter string                    // Delimiter for array parsing (default: comma)
-	environFunc    func() []string           // Optional env override for testing
+	global         bool                            // Controls whether this source should be loaded globally
+	arrayStrategy  ArrayStrategy                   // Strategy for parsing array values
+	arrayDelimiter string                          // Delimiter for array parsing (default: comma)
+	environFunc    func() []string                 // Optional env override for testing
 	transformFunc  func(k, v string) (string, any) // Custom transform callback
 }
 
@@ -113,7 +121,7 @@ func (e *EnvConfigSource) Load(ctx context.Context, cm configManager) error {
 
 	// Collect env vars with optional prefix
 	allEnvVars := environ()
-	
+
 	// Build map of key -> value, filtering by prefix
 	envVars := make(map[string]string)
 	for _, kv := range allEnvVars {
@@ -181,32 +189,33 @@ func (e *EnvConfigSource) Watch(_ context.Context, _ configManager, _ WatchOnCha
 
 // tryParseArray attempts to parse a value as an array based on the configured strategy.
 func (e *EnvConfigSource) tryParseArray(key, value string) any {
-	result, parsed := e.parseAsArray(value)
-	if parsed {
+	if result, parsed := e.parseAsArray(value); parsed {
 		return result
 	}
 	return value
 }
 
 // parseAsArray tries to parse a value as an array using the configured strategies.
-// Returns the parsed array (if successful) and whether parsing succeeded.
-func (e *EnvConfigSource) parseAsArray(value string) ([]string, bool) {
+// Returns the parsed value (if successful) and whether parsing succeeded.
+// String-only arrays are coalesced to []string; arrays containing objects or
+// other mixed types remain []any so nested values keep their structure.
+func (e *EnvConfigSource) parseAsArray(value string) (any, bool) {
 	// Order of attempts depends on strategy
-	var strategies []func(string) ([]string, bool)
+	var strategies []func(string) (any, bool)
 
 	switch e.arrayStrategy {
 	case ArrayStrategyAuto:
-		strategies = []func(string) ([]string, bool){
-			e.tryParseJSONArray,
+		strategies = []func(string) (any, bool){
+			e.tryParseJSONValue,
 			e.tryParseDelimitedArray,
 		}
 	case ArrayStrategyDelimited:
-		strategies = []func(string) ([]string, bool){
+		strategies = []func(string) (any, bool){
 			e.tryParseDelimitedArray,
 		}
 	case ArrayStrategyJSON:
-		strategies = []func(string) ([]string, bool){
-			e.tryParseJSONArray,
+		strategies = []func(string) (any, bool){
+			e.tryParseJSONValue,
 		}
 	case ArrayStrategyIndex:
 		// Handled separately in mergeIndexBasedArrays
@@ -225,7 +234,7 @@ func (e *EnvConfigSource) parseAsArray(value string) ([]string, bool) {
 }
 
 // tryParseDelimitedArray parses a delimited string into an array.
-func (e *EnvConfigSource) tryParseDelimitedArray(value string) ([]string, bool) {
+func (e *EnvConfigSource) tryParseDelimitedArray(value string) (any, bool) {
 	if value == "" {
 		return nil, false
 	}
@@ -253,35 +262,95 @@ func (e *EnvConfigSource) tryParseDelimitedArray(value string) ([]string, bool) 
 	return nil, false
 }
 
-// tryParseJSONArray attempts to parse a JSON array.
-func (e *EnvConfigSource) tryParseJSONArray(value string) ([]string, bool) {
-	value = strings.TrimSpace(value)
-	if !isJSONArray(value) {
+// tryParseJSONValue parses the value as JSON (array or object). Arrays are
+// coalesced via coalesceJSONArray; a top-level object is returned as
+// map[string]any so nested structures survive decoding.
+func (e *EnvConfigSource) tryParseJSONValue(value string) (any, bool) {
+	result, ok := parseJSONValue(value)
+	if !ok {
 		return nil, false
 	}
-
-	// Use proper JSON parsing to handle commas within strings correctly
-	var parsed []any
-	if err := json.Unmarshal([]byte(value), &parsed); err != nil {
-		return nil, false
-	}
-
-	result := make([]string, 0, len(parsed))
-	for _, item := range parsed {
-		if str, ok := item.(string); ok {
-			result = append(result, str)
-		} else {
-			// Non-string elements are converted to strings
-			result = append(result, fmt.Sprintf("%v", item))
-		}
-	}
-
-	return result, true
+	return e.coalesceJSONArray(result), true
 }
 
-// isJSONArray checks if a string looks like a JSON array.
-func isJSONArray(s string) bool {
-	return strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]")
+// coalesceJSONArray converts a JSON-parsed []any into []string when every
+// element is a string, keeping the narrower type for consumers that expect it.
+// Empty arrays also coalesce so they are indistinguishable from previous output.
+func (e *EnvConfigSource) coalesceJSONArray(value any) any {
+	arr, ok := value.([]any)
+	if !ok {
+		return value
+	}
+	if len(arr) == 0 {
+		return []string{}
+	}
+	return coalesceType[string](arr)
+}
+
+// parseJSONValue parses a JSON array or object string, converting JSON numbers
+// to int64 (or float64 for fractional values) and objects to map[string]any.
+// Returns the parsed value and whether the input was valid JSON.
+func parseJSONValue(value string) (any, bool) {
+	value = strings.TrimSpace(value)
+	if !isJSONValue(value) {
+		return nil, false
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(value))
+	decoder.UseNumber()
+	var parsed any
+	if err := decoder.Decode(&parsed); err != nil {
+		return nil, false
+	}
+	// Reject anything after the JSON value (e.g. "[1] trailing")
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false
+	}
+
+	return convertJSONNumbers(parsed), true
+}
+
+// isJSONValue checks whether the string is wrapped as a JSON array or object.
+func isJSONValue(s string) bool {
+	if s == "" {
+		return false
+	}
+	switch s[0] {
+	case '[':
+		return s[len(s)-1] == ']'
+	case '{':
+		return s[len(s)-1] == '}'
+	default:
+		return false
+	}
+}
+
+// convertJSONNumbers walks a decoded JSON value and converts json.Number to
+// int64 when possible, float64 otherwise.
+func convertJSONNumbers(value any) any {
+	switch v := value.(type) {
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return i
+		}
+		f, err := v.Float64()
+		if err != nil {
+			return v
+		}
+		return f
+	case []any:
+		for i, item := range v {
+			v[i] = convertJSONNumbers(item)
+		}
+		return v
+	case map[string]any:
+		for k, item := range v {
+			v[k] = convertJSONNumbers(item)
+		}
+		return v
+	default:
+		return value
+	}
 }
 
 // cleanParts trims whitespace and removes empty strings.
@@ -295,27 +364,49 @@ func cleanParts(parts []string) []string {
 	return result
 }
 
-
 // mergeIndexBasedArrays merges index-based environment variables into arrays.
 // For example: APP_HOSTS_0=site1, APP_HOSTS_1=site2 → hosts: ["site1", "site2"]
+// An element may be a JSON array or object ('{"k":"v"}'); those are parsed into
+// Go values so structured elements keep their shape. Mixed element types stay
+// as []any; uniform string elements are coalesced to []string.
 func (e *EnvConfigSource) mergeIndexBasedArrays(envValues map[string]string, transform func(k, v string) (string, any), result map[string]any) {
 	if !e.shouldUseIndexStrategy() {
 		return
 	}
 
 	groups := e.groupByIndex(envValues)
+	mergedBases := make(map[string]bool)
 
 	for baseKey, indexMap := range groups {
 		if array := e.indexMapToArray(indexMap); array != nil {
-			if transformedKey, ok := e.transformKey(baseKey, transform); ok {
-				// Apply transform to each array element
-				transformedValues := make([]any, len(array))
-				for i, val := range array {
-					_, transformedVal := transform(baseKey, val)
-					transformedValues[i] = transformedVal
-				}
-				result[transformedKey] = coalesceType[string](transformedValues)
+			transformedKey, ok := e.transformKey(baseKey, transform)
+			if !ok {
+				continue
 			}
+			mergedBases[baseKey] = true
+			transformedValues := lo.Map(array, func(val string, _ int) any {
+				_, transformedVal := transform(baseKey, val)
+				if str, isStr := transformedVal.(string); isStr {
+					if parsed, parsedOk := e.tryParseJSONValue(str); parsedOk {
+						transformedVal = parsed
+					}
+				}
+				return transformedVal
+			})
+			result[transformedKey] = e.coalesceJSONArray(transformedValues)
+		}
+	}
+
+	// Remove the individual indexed entries that were merged into the arrays.
+	// Apply the same index range guard as groupByIndex and compute the deletion
+	// key through the same transform(key, value) call Load used to store it.
+	for rawKey := range envValues {
+		base, index, ok := parseIndexSuffix(rawKey)
+		if !ok || index < 0 || index > maxIndexCount || !mergedBases[base] {
+			continue
+		}
+		if key, _ := transform(rawKey, envValues[rawKey]); key != "" {
+			delete(result, key)
 		}
 	}
 }
@@ -334,7 +425,7 @@ func (e *EnvConfigSource) groupByIndex(envValues map[string]string) map[string]m
 		if !ok {
 			continue
 		}
-		if index < 0 || index > 1000 {
+		if index < 0 || index > maxIndexCount {
 			continue
 		}
 		if groups[baseKey] == nil {
