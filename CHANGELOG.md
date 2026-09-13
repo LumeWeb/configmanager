@@ -1,3 +1,13 @@
+## 0.3.31 (2026-09-13)
+
+### Features
+
+- support structured JSON values in EnvConfigSource
+
+### Fixes
+
+- guard index cleanup against out-of-range entries and value-dependent transforms
+
 ## 0.3.30 (2026-08-28)
 
 ### Features
