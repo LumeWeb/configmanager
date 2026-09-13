@@ -2,12 +2,13 @@ package source
 
 import (
 	"context"
-	"github.com/stretchr/testify/require"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEnvConfigSource_Load(t *testing.T) {
@@ -1016,4 +1017,61 @@ func TestEnvConfigSource_ArrayParsing_StructuredJSON(t *testing.T) {
 			assert.Equal(t, tt.expectedVal, val)
 		})
 	}
+}
+
+func TestEnvConfigSource_IndexMerge_Cleanup(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("out-of-range indexed entries are kept", func(t *testing.T) {
+		os.Setenv("APP_ITEMS_0", `{"k":"v"}`)
+		os.Setenv("APP_ITEMS_2000", `"solo"`)
+		defer func() {
+			os.Unsetenv("APP_ITEMS_0")
+			os.Unsetenv("APP_ITEMS_2000")
+		}()
+
+		mgr := newMockManager(".")
+		source := NewEnvConfigSource("APP_", "_",
+			WithEnvSourceArrayStrategy(ArrayStrategyAuto, ""))
+
+		err := source.Load(ctx, mgr)
+		assert.NoError(t, err)
+
+		val, _, err := mgr.Get("items")
+		assert.NoError(t, err)
+		assert.Equal(t, []any{map[string]any{"k": "v"}}, val)
+
+		val, _, err = mgr.Get("items.2000")
+		assert.NoError(t, err)
+		assert.Equal(t, `"solo"`, val)
+	})
+
+	t.Run("cleanup keys match keys stored by value-dependent transforms", func(t *testing.T) {
+		customEnv := []string{
+			"APP_ITEMS_0=" + `{"k":"v"}`,
+		}
+
+		mgr := newMockManager(".")
+		source := NewEnvConfigSource("APP_", "_",
+			WithEnvEnvironFunc(func() []string { return customEnv }),
+			WithEnvSourceArrayStrategy(ArrayStrategyIndex, ""),
+			WithEnvTransformFunc(func(k, v string) (string, any) {
+				stripped := strings.ToLower(strings.TrimPrefix(k, "APP_"))
+				if v == "" {
+					return stripped, v
+				}
+				// A transform whose returned key depends on the value
+				return stripped + "_" + strconv.Itoa(len(v)), v
+			}))
+
+		err := source.Load(ctx, mgr)
+		assert.NoError(t, err)
+
+		val, _, err := mgr.Get("items")
+		assert.NoError(t, err)
+		assert.Equal(t, []any{map[string]any{"k": "v"}}, val)
+
+		// The individual entry must have been removed by its stored key
+		assert.False(t, mgr.Exists("items_0_9"))
+	})
 }

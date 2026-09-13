@@ -39,6 +39,9 @@ const (
 // Note: colon ":" and space " " are excluded to avoid false positives with URLs, IP addresses, and multi-word strings.
 var commonDelimiters = []string{",", "|", ";"}
 
+// maxIndexCount bounds the highest valid index for index-based array elements.
+const maxIndexCount = 1000
+
 // EnvConfigSource loads configuration from environment variables.
 type EnvConfigSource struct {
 	prefix         string
@@ -394,12 +397,16 @@ func (e *EnvConfigSource) mergeIndexBasedArrays(envValues map[string]string, tra
 		}
 	}
 
-	// Remove the individual indexed entries that were merged into the arrays
+	// Remove the individual indexed entries that were merged into the arrays.
+	// Apply the same index range guard as groupByIndex and compute the deletion
+	// key through the same transform(key, value) call Load used to store it.
 	for rawKey := range envValues {
-		if base, _, ok := parseIndexSuffix(rawKey); ok && mergedBases[base] {
-			if key, ok := e.transformKey(rawKey, transform); ok {
-				delete(result, key)
-			}
+		base, index, ok := parseIndexSuffix(rawKey)
+		if !ok || index < 0 || index > maxIndexCount || !mergedBases[base] {
+			continue
+		}
+		if key, _ := transform(rawKey, envValues[rawKey]); key != "" {
+			delete(result, key)
 		}
 	}
 }
@@ -418,7 +425,7 @@ func (e *EnvConfigSource) groupByIndex(envValues map[string]string) map[string]m
 		if !ok {
 			continue
 		}
-		if index < 0 || index > 1000 {
+		if index < 0 || index > maxIndexCount {
 			continue
 		}
 		if groups[baseKey] == nil {
