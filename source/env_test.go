@@ -381,12 +381,12 @@ func TestEnvConfigSource_ArrayParsing_AutoStrategy(t *testing.T) {
 			expectedVal: []string{"node1", "node2", "node3"},
 		},
 		{
-			name: "comma-delimited array",
+			name: "value containing delimiters stays a string",
 			envVars: map[string]string{
 				"APP_TAGS": "web,api,database",
 			},
 			expectedKey: "tags",
-			expectedVal: []string{"web", "api", "database"},
+			expectedVal: "web,api,database",
 		},
 		{
 			name: "empty JSON array",
@@ -698,6 +698,28 @@ func TestEnvConfigSource_ArrayParsing_EdgeCases(t *testing.T) {
 			expectedKey:   "ip",
 			expectedVal:   "2001:db8::1",
 			shouldConvert: false,
+		},
+		{
+			name: "scalar containing every common delimiter stays a string",
+			envVars: map[string]string{
+				"APP_VALUE": "abc,def|ghi;jkl",
+			},
+			strategy:      ArrayStrategyAuto,
+			delimiter:     ",",
+			expectedKey:   "value",
+			expectedVal:   "abc,def|ghi;jkl",
+			shouldConvert: false,
+		},
+		{
+			name: "delimited strategy still splits scalars when explicitly configured",
+			envVars: map[string]string{
+				"APP_TAGS": "web,api,database",
+			},
+			strategy:      ArrayStrategyDelimited,
+			delimiter:     ",",
+			expectedKey:   "tags",
+			expectedVal:   []string{"web", "api", "database"},
+			shouldConvert: true,
 		},
 	}
 
