@@ -702,11 +702,11 @@ func TestEnvConfigSource_ArrayParsing_EdgeCases(t *testing.T) {
 		{
 			name: "scalar containing every common delimiter stays a string",
 			envVars: map[string]string{
-				"APP_SECRET": "abc,def|ghi;jkl",
+				"APP_VALUE": "abc,def|ghi;jkl",
 			},
 			strategy:      ArrayStrategyAuto,
 			delimiter:     ",",
-			expectedKey:   "secret",
+			expectedKey:   "value",
 			expectedVal:   "abc,def|ghi;jkl",
 			shouldConvert: false,
 		},
