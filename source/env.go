@@ -16,7 +16,10 @@ type ArrayStrategy int
 
 const (
 	// ArrayStrategyAuto automatically detects the best parsing strategy.
-	// Tries in order: index-based → JSON arrays → delimited (comma).
+	// Tries in order: index-based → JSON arrays. Values that are not JSON
+	// are kept as plain strings, so scalars that happen to contain delimiter
+	// characters are never split. Use ArrayStrategyDelimited to opt in to
+	// delimiter-based splitting.
 	ArrayStrategyAuto ArrayStrategy = iota
 
 	// ArrayStrategyIndex uses index-based environment variables (APP_KEY_0, APP_KEY_1).
@@ -205,9 +208,12 @@ func (e *EnvConfigSource) parseAsArray(value string) (any, bool) {
 
 	switch e.arrayStrategy {
 	case ArrayStrategyAuto:
+		// Delimiter splitting is deliberately excluded: any scalar containing
+		// a delimiter character would be silently corrupted into a slice, and
+		// the schema cannot distinguish list fields from string fields holding
+		// delimiter characters. Delimited lists require an explicit opt-in.
 		strategies = []func(string) (any, bool){
 			e.tryParseJSONValue,
-			e.tryParseDelimitedArray,
 		}
 	case ArrayStrategyDelimited:
 		strategies = []func(string) (any, bool){
