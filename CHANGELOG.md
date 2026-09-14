@@ -1,3 +1,9 @@
+## 0.3.32 (2026-09-14)
+
+### Fixes
+
+- stop auto array parsing from splitting scalar values on delimiters
+
 ## 0.3.31 (2026-09-13)
 
 ### Features
